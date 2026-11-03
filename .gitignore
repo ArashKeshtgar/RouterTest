@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Test output can contain real serials/IMEIs - never commit it
+reports/
+
+# Real device data stays on the test bench, not in git
+notes/private/
+*.real.json
