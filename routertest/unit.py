@@ -18,6 +18,7 @@ class Unit:
     label: Label
     admin_url: str = "http://192.168.1.1"
     interface: str | None = None  # e.g. "Ethernet 3"; None = OS default route
+    manually_reset: bool = False  # operator already reset it during this run
     results: list = field(default_factory=list)
 
     @property

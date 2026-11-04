@@ -20,7 +20,7 @@ def write(units: list[Unit], out_dir: Path) -> tuple[Path, Path]:
             "serial": u.label.serial,
             "model": u.label.model,
             "check": r.name,
-            "result": "PASS" if r.passed else "FAIL",
+            "result": r.status,
             "seconds": r.seconds,
             "detail": r.detail,
         }
@@ -57,6 +57,7 @@ table {{ border-collapse: collapse; width: 100%; }}
 th, td {{ border: 1px solid #ccc; padding: 6px 10px; text-align: left; }}
 tr.pass td:nth-child(6) {{ color: #137333; font-weight: 600; }}
 tr.fail td:nth-child(6) {{ color: #c5221f; font-weight: 600; }}
+tr.skip td:nth-child(6) {{ color: #5f6368; font-weight: 600; }}
 </style></head><body>
 <h1>Test run {stamp}</h1>
 <p>{passed} of {len(units)} unit(s) passed.</p>
