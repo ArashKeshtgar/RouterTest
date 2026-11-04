@@ -13,6 +13,7 @@ from . import checks, pages, qr, report
 from .unit import Unit
 
 MOCK_URL = "http://127.0.0.1:7357"
+SHOW_SLOW_MS = 800
 
 
 def ask_manual_reset() -> None:
@@ -40,10 +41,13 @@ def run_steps(page, unit: Unit, profile: dict, ask_operator) -> None:
 
 def run_unit(unit: Unit, profile: dict, headless: bool) -> None:
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
+        # The mock answers instantly, so a visible run needs slowing to be watchable
+        browser = p.chromium.launch(headless=headless, slow_mo=0 if headless else SHOW_SLOW_MS)
         page = browser.new_page()
         try:
             run_steps(page, unit, profile, ask_manual_reset)
+            if not headless:
+                input("Test finished. Press Enter to close the browser: ")
         finally:
             browser.close()
 
