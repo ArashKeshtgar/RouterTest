@@ -80,6 +80,7 @@ routertest/
   report.py       CSV and HTML report
   cli.py          operator entry point
   mock_server.py  fake admin page for development
+browser/          page capture that runs inside Chrome, no install (build.py makes the bookmarklet)
 samples/          fake label data only
 notes/            what to collect from the real device
 ```
