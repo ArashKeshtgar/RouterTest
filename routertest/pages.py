@@ -46,13 +46,25 @@ _FASTMILE = {
     "fields": {
         "serial": "TODO",
         "mac": "TODO",
-        "imei": "TODO",  # not on device details - find which page shows it
+        "imei": "TODO",  # not on device details - try WAN > Cellular Status
         "firmware": "TODO",
     },
     "reset_button": "TODO",
 }
 
-PROFILES["fastmile_12"] = {**_FASTMILE}
+# From a page capture of a real Gateway 12. The buttons have no ids, so Sign in
+# and the error dialog are found by their English text.
+PROFILES["fastmile_12"] = {
+    **_FASTMILE,
+    "login_path": "/web_whw/#/login",
+    "username": "#username-login-value",
+    "password": "#passwordLoginAria",
+    "submit": 'button[type="button"]:has-text("Sign in")',
+    "logged_in": 'div[role="button"].mapClickArea',
+    "login_error": 'div:has-text("Invalid login credentials")',
+    "open_details": 'div[role="button"].mapClickArea',
+}
+# Same web app, but not captured yet: nothing is copied from the 12 until it is
 PROFILES["fastmile_3_2"] = {**_FASTMILE}
 
 # Model field (N) of the QR label -> profile.

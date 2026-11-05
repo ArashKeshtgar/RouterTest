@@ -61,6 +61,7 @@ def test_details_page_hides_device_data(page):
     log_in(page)
     output = capture(page)
     assert "#serial" in output and "#factory-reset" in output
+    assert "div#device-info > p" in output
     for secret in (LABEL["S"], LABEL["IMEI"], "00:11:22:33:44:AA"):
         assert secret not in output
 

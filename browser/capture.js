@@ -53,6 +53,30 @@
     return selector;
   }
 
+  // Plain divs give no selector of their own: the parents and the text just
+  // before them show how to reach a value, such as the one after "Serial number"
+  function shortName(el) {
+    var name = el.tagName.toLowerCase();
+    var classes = Array.prototype.slice.call(el.classList).filter(function (c) {
+      return !/^(ng-|_ng|cdk-)/.test(c);
+    }).slice(0, 2);
+    return el.id ? name + '#' + el.id : [name].concat(classes).join('.');
+  }
+
+  function pathOf(el) {
+    var parts = [];
+    for (var cur = el.parentElement; cur && parts.length < 3; cur = cur.parentElement) {
+      parts.unshift(shortName(cur));
+    }
+    return parts.join(' > ');
+  }
+
+  function textBefore(el) {
+    var before = el.previousElementSibling ||
+      (el.parentElement && el.parentElement.previousElementSibling);
+    return before ? mask(before.textContent).slice(0, 30) : '';
+  }
+
   function describe(el) {
     var parts = [el.getAttribute('placeholder'), el.getAttribute('aria-label'), el.getAttribute('title')];
     if (el.tagName.toLowerCase() !== 'input') parts.unshift(el.textContent);
@@ -68,11 +92,12 @@
     var root = el.getRootNode();
     var shadow = root === document ? '' : ' [shadow]';
     var count = root.querySelectorAll(selector).length;
-    lines.push(kind + ' | ' + selector + ' | x' + count + shadow + ' | ' + describe(el));
+    lines.push([kind, selector, 'x' + count + shadow, describe(el),
+      'in: ' + pathOf(el), 'after: ' + textBefore(el)].join(' | '));
   });
 
   var header = [
-    'capture v1',
+    'capture v2',
     'page: ' + location.pathname + location.hash.split('?')[0],
     'iframes: ' + document.querySelectorAll('iframe').length,
     'lines: ' + lines.length + (lines.length > MAX_LINES ? ' (cut to ' + MAX_LINES + ')' : '')
