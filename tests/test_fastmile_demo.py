@@ -290,11 +290,11 @@ def test_json_has_the_three_stations_after_a_pass(router):
 
 
 def test_json_after_a_functional_fail_keeps_the_wipe(router):
-    assert [s[2] for s in stations(router(signal="Disconnected"))] == ["PASS", "FAIL", "PENDING"]
+    assert [s[2] for s in stations(router(signal="Disconnected"))] == ["PASS", "FAIL-FAIL", "PENDING"]
 
 
 def test_json_after_wrong_identity_shows_no_wipe(router):
-    assert [s[2] for s in stations(router(serial="OTHER-SERIAL"))] == ["NOT-RUN", "FAIL", "PENDING"]
+    assert [s[2] for s in stations(router(serial="OTHER-SERIAL"))] == ["NOT-RUN", "FAIL-FAIL", "PENDING"]
 
 
 def test_visual_check_choice_goes_in_a_new_json(router):

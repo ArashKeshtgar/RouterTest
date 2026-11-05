@@ -8,7 +8,9 @@
 // Nothing is sent to OLP. It also remembers in this tab, by the serial's last 4,
 // that a unit was already reset.
 (function () {
-  var VERSION = 'fastmile demo v5';
+  var VERSION = 'fastmile demo v6';
+  // OLP's two results for every station are PASS and this
+  var OLP_FAIL = 'FAIL-FAIL';
   var RESET_KEY = 'rt-demo-reset';
   var SETTLE_MS = 20000;
   var CONNECT_MS = 120000;
@@ -478,7 +480,7 @@
         return;
       }
       if (!await checkIdentity(label)) {
-        testing = 'FAIL';
+        testing = OLP_FAIL;
         finish('FAIL', 'unit does not match the label, not reset');
         return;
       }
@@ -493,20 +495,21 @@
         location.hash = '#/login';
         if (!await logIn(label, true)) {
           report('Login', 'FAIL', 'label rejected after reset');
-          wipe = { value: 'FAIL', detail: 'Label rejected after reset' };
+          wipe = { value: OLP_FAIL, detail: 'Label rejected after reset' };
           finish('FAIL', 'label rejected after reset');
           return;
         }
         wipe = { value: 'PASS', detail: 'Reset, then logged in with the label' };
         stage = 'testing';
       }
-      testing = await checkUnit(label) ? 'PASS' : 'FAIL';
-      finish(testing);
+      var passed = await checkUnit(label);
+      testing = passed ? 'PASS' : OLP_FAIL;
+      finish(passed ? 'PASS' : 'FAIL');
     } catch (e) {
       report('Stopped', 'FAIL', e.message);
       logPage();
-      if (stage === 'testing') testing = 'FAIL';
-      else wipe = { value: 'FAIL', detail: e.message };
+      if (stage === 'testing') testing = OLP_FAIL;
+      else wipe = { value: OLP_FAIL, detail: e.message };
       var outcome = stage === 'reset' ? 'CHECK RESET BY HAND' :
         stage === 'second login' ? 'RESET DONE, RELOAD AND SCAN AGAIN' : 'FAIL';
       finish(outcome, e.message);
