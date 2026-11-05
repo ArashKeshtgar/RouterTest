@@ -5,6 +5,8 @@
 (function () {
   var BOX_ID = 'rt-capture';
   var MAX_LINES = 300;
+  // A customer's Wi-Fi name can be plain words, so the digit rule misses it
+  var WIFI_NAME = '[id*="wificard"], .wifi-card, .ssid-card, pv-wifi-card';
   var old = document.getElementById(BOX_ID);
   if (old) old.remove();
 
@@ -13,6 +15,10 @@
     return (text || '').replace(/\s+/g, ' ').trim().split(' ').map(function (word) {
       return /\d/.test(word) && word.length >= 4 ? '***' : word;
     }).join(' ').slice(0, 60);
+  }
+
+  function hasWifiName(el) {
+    return !!(el.closest(WIFI_NAME) || el.querySelector(WIFI_NAME));
   }
 
   function allElements(root, found) {
@@ -74,10 +80,12 @@
   function textBefore(el) {
     var before = el.previousElementSibling ||
       (el.parentElement && el.parentElement.previousElementSibling);
-    return before ? mask(before.textContent).slice(0, 30) : '';
+    if (!before) return '';
+    return hasWifiName(before) ? '***' : mask(before.textContent).slice(0, 30);
   }
 
   function describe(el) {
+    if (hasWifiName(el)) return '***';
     var parts = [el.getAttribute('placeholder'), el.getAttribute('aria-label'), el.getAttribute('title')];
     if (el.tagName.toLowerCase() !== 'input') parts.unshift(el.textContent);
     return mask(parts.filter(Boolean).join(' / '));
@@ -97,7 +105,7 @@
   });
 
   var header = [
-    'capture v2',
+    'capture v3',
     'page: ' + location.pathname + location.hash.split('?')[0],
     'iframes: ' + document.querySelectorAll('iframe').length,
     'lines: ' + lines.length + (lines.length > MAX_LINES ? ' (cut to ' + MAX_LINES + ')' : '')

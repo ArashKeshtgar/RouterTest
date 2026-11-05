@@ -66,6 +66,16 @@ def test_details_page_hides_device_data(page):
         assert secret not in output
 
 
+def test_wifi_name_without_digits_is_hidden(page):
+    page.set_content(
+        '<div id="wificard_1"><p class="wifi-card"><strong>Some Family Home</strong></p></div>'
+        "<p>Next line</p>"
+    )
+    output = capture(page)
+    assert "Family" not in output
+    assert "Next line" in output
+
+
 def test_capture_is_read_only_and_leaves_page_alone(page):
     requests = []
     page.on("request", lambda r: requests.append(r))
