@@ -20,7 +20,17 @@ and MACs.** Keep raw material in `notes/private/` (git-ignored).
 - Device details has no URL of its own; click the device on the Network map.
   It shows serial, MAC, firmware, hardware version and the reset button. The
   IMEI and SIM status are on WAN > Cellular Status.
-- A third family runs a different web app (`/login.lp`, footer says Vantiva).
+- Four models come through. Gateway 12 FastMile (high volume) and Gateway 3.2 5G
+  are Nokia; the pages call both "FastMile 5G Gateway". Vantiva and the newer
+  Condo are Vantiva, with a different web app (`/login.lp`). Vantiva pages
+  do not show the model name, so note it when capturing.
+- Telling the captures apart: Gateway 12 has `role` attributes and
+  `#factorydefaultbtn`; Gateway 3.2 has neither. Condo has `#Wi-Fi_tab` and
+  `#wwan_ip`; Vantiva has `#Wireless_tab` and `#mobileWwanIp`.
+- WAN > Cellular Status has its own Reset, for the data counter. It is not the
+  factory reset.
+- Vantiva settings open as pop-ups from the dashboard cards, with no URL of
+  their own. Factory reset is System Info > Configuration on both models.
 - Overview also shows the SSID, Wi-Fi bands up/down and 5G/4G status, so those
   checks can be read from the page. The 12 has 2.4/5/6 GHz, the 3.2 has 2.4/5.
 - The status words differ: "Not connected" on the 12, "Offline" and

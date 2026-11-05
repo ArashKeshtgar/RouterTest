@@ -1,4 +1,4 @@
-"""Turn capture.js into a bookmarklet: one line to paste as a Chrome bookmark's URL.
+"""Turn the browser scripts into bookmarklets: one line to paste as a Chrome bookmark's URL.
 
     python browser/build.py
 """
@@ -17,8 +17,9 @@ def bookmarklet(source: str) -> str:
 
 
 def main() -> None:
-    source = (HERE / "capture.js").read_text(encoding="utf-8")
-    (HERE / "capture.bookmarklet.txt").write_text(bookmarklet(source) + "\n", encoding="utf-8")
+    for name in ("capture", "fastmile_demo"):
+        source = (HERE / f"{name}.js").read_text(encoding="utf-8")
+        (HERE / f"{name}.bookmarklet.txt").write_text(bookmarklet(source) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

@@ -35,8 +35,8 @@ def page():
         browser.close()
 
 
-@pytest.mark.parametrize("name", ["fastmile_12", "fastmile_3_2"])
-def test_fastmile_details_are_read_from_their_labels(page, name):
+@pytest.mark.parametrize("name", ["gateway_12_fastmile", "gateway_3_2_5g"])
+def test_nokia_details_are_read_from_their_labels(page, name):
     profile = pages.PROFILES[name]
     page.set_content(DETAILS_HTML)
     page.wait_for_selector(profile["details"])
@@ -47,14 +47,25 @@ def test_fastmile_details_are_read_from_their_labels(page, name):
     }
 
 
-def test_fastmile_imei_is_the_value_not_the_title(page):
+def test_gateway_12_imei_is_the_value_not_the_title(page):
     page.set_content(CELLULAR_HTML)
-    fields = pages.PROFILES["fastmile_12"]["cellular_fields"]
+    fields = pages.PROFILES["gateway_12_fastmile"]["cellular_fields"]
     assert admin._read_fields(page, fields) == {"imei": "000000000000001"}
 
 
 def test_error_dialog_selector_combines_with_logged_in(page):
-    profile = pages.PROFILES["fastmile_12"]
+    profile = pages.PROFILES["gateway_12_fastmile"]
     page.set_content("<div>Invalid login credentials. Login attempt failed 1 time</div>")
     page.wait_for_selector(f"{profile['logged_in']}, {profile['login_error']}")
     assert not page.is_visible(profile["logged_in"])
+
+
+@pytest.mark.parametrize("name", ["vantiva", "condo"])
+def test_vantiva_card_id_with_a_space_is_found(page, name):
+    page.set_content('<div id="System Info"></div>')
+    assert page.locator(pages.PROFILES[name]["open_details"]).count() == 1
+
+
+def test_gateway_3_2_logged_in_works_without_role_attributes(page):
+    page.set_content('<div class="sidenav-logout flex-row__spacebetween">Sign Out</div>')
+    assert page.is_visible(pages.PROFILES["gateway_3_2_5g"]["logged_in"])

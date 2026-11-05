@@ -37,7 +37,7 @@ def _detail(label: str) -> str:
 
 # From page captures of real units. Do not guess - every value here must come
 # from the real device. TODO values are the ones not captured yet.
-_FASTMILE = {
+_NOKIA = {
     "login_path": "/web_whw/#/login",
     "username": "TODO",
     "password": "TODO",
@@ -66,8 +66,8 @@ _FASTMILE = {
 # The buttons have no ids, so Sign in and the error dialog are found by their
 # English text. The dialog counts failed logins, and the unit seems to lock after
 # about 3, so the tool only ever tries once per reset.
-PROFILES["fastmile_12"] = {
-    **_FASTMILE,
+PROFILES["gateway_12_fastmile"] = {
+    **_NOKIA,
     "username": "#username-login-value",
     "password": "#passwordLoginAria",
     "submit": 'button[type="button"]:has-text("Sign in")',
@@ -75,30 +75,48 @@ PROFILES["fastmile_12"] = {
     "login_error": 'div:has-text("Invalid login credentials")',
     "open_details": 'div[role="button"].mapClickArea',
 }
-# Same web app. Its login page and Network map are not captured yet.
-PROFILES["fastmile_3_2"] = {**_FASTMILE}
+# Same app in an older build: its elements have no role attributes or button
+# ids, so the Gateway 12's login and map selectors do not carry over. Its login
+# page and Network map are not captured yet.
+PROFILES["gateway_3_2_5g"] = {**_NOKIA, "logged_in": "div.sidenav-logout"}
 
-# A different make and web app (footer says Vantiva). Which model it is: TODO.
-PROFILES["vantiva"] = {
-    "login_path": "/login.lp",
-    "username": "#srp_username",
-    "password": "#srp_password",
-    "submit": "#sign-me-in",
+# A different make and web app (footer says Vantiva). There are two models,
+# Vantiva and the newer Condo. Their dashboard cards and pop-ups match. Card
+# ids can hold a space, so they cannot be written as #System Info.
+_VANTIVA = {
     "logged_in": "#System_Info_tab",
-    "login_error": "#erroruserpass",
-    "overview_path": "TODO",
-    "open_details": "TODO",
-    "details": "TODO",
+    "overview_path": "/",
+    # Serial and MAC are likely on the Global Information tab: not captured yet.
+    "open_details": '[id="System Info"]',
+    "details": "#system-info-modal",
     "fields": {"serial": "TODO", "mac": "TODO", "firmware": "TODO"},
     "cellular_path": "TODO",
     "cellular_fields": {"imei": "TODO"},
     "reset_button": "TODO",
 }
+PROFILES["vantiva"] = {
+    **_VANTIVA,
+    "login_path": "/login.lp",
+    "username": "#srp_username",
+    "password": "#srp_password",
+    "submit": "#sign-me-in",
+    "login_error": "#erroruserpass",
+}
+# Its login page is not captured yet.
+PROFILES["condo"] = {
+    **_VANTIVA,
+    "login_path": "TODO",
+    "username": "TODO",
+    "password": "TODO",
+    "submit": "TODO",
+    "login_error": "TODO",
+}
 
 # Model field (N) of the QR label -> profile.
-# TODO: confirm 5G16-12W-A is the Gateway 12, and add the Gateway 3.2's label value.
+# TODO: confirm 5G16-12W-A is the Gateway 12, and add the label values of the
+# Gateway 3.2 and both Vantiva models.
 MODELS = {
-    "5G16-12W-A": "fastmile_12",
+    "5G16-12W-A": "gateway_12_fastmile",
 }
 
 
