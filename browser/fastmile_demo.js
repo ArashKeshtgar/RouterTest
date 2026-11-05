@@ -1,9 +1,10 @@
 // FastMile demo: scan the label, and the page logs in with it and checks the
 // unit against it. Runs in the router's own page and sends nothing anywhere. It
 // clicks only Sign in and the device on the Network map, tries the login once,
-// and never touches Reset, Reboot or a setting. Nothing is saved.
+// and never touches Reset, Reboot or a setting. The only thing it saves is a
+// .txt log in Downloads, which holds steps and times but no device data.
 (function () {
-  var VERSION = 'fastmile demo v1';
+  var VERSION = 'fastmile demo v2';
   var BOX_ID = 'rt-demo';
   var MODEL = 'FastMile 5G Gateway 12';
   var WAIT_MS = 30000;
@@ -119,6 +120,7 @@
     'font:14px Arial,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,.4)';
   box.innerHTML = '<strong>' + VERSION + '</strong>' +
     '<button id="rt-close" style="float:right">Close</button>' +
+    '<button id="rt-save" style="float:right;margin-right:6px">Save log</button>' +
     '<p id="rt-status" style="margin:8px 0">Scan the QR label now.</p>' +
     '<textarea id="rt-scan" rows="3" style="width:100%;box-sizing:border-box"></textarea>' +
     '<table id="rt-rows" style="width:100%;border-collapse:collapse"></table>' +
@@ -129,10 +131,50 @@
   var rows = box.querySelector('#rt-rows');
   var result = box.querySelector('#rt-result');
   box.querySelector('#rt-close').onclick = function () { box.remove(); };
+  box.querySelector('#rt-save').onclick = function () { saveLog(); };
   scan.focus();
 
   var started = 0;
   var checks = [];
+  var logLines = [];
+
+  function pad(number) {
+    return String(number).padStart(2, '0');
+  }
+
+  function clock(now, gap) {
+    return [pad(now.getHours()), pad(now.getMinutes()), pad(now.getSeconds())].join(gap);
+  }
+
+  function log(message) {
+    var seconds = started ? ' +' + Math.round((Date.now() - started) / 1000) + 's' : '';
+    logLines.push('[' + clock(new Date(), ':') + seconds + '] ' + message);
+  }
+
+  // Page facts for a stop, without any of the page's values
+  function logPage() {
+    log('page: ' + location.pathname + location.hash);
+    ['IMEI', 'Status', 'Serial number', 'MAC address', 'Device name', 'WiFi 2.4 GHz', '5G+ Signal'].forEach(function (label) {
+      var seen = leaves().some(function (el) { return text(el) === label; });
+      var state = !seen ? 'not on page' : valueOf(label) ? 'has a value' : 'no value found';
+      log('label "' + label + '": ' + state);
+    });
+    log('map on page: ' + !!find('div[role="button"].mapClickArea'));
+    log('sign out on page: ' + !!find('div.sidenav-logout'));
+  }
+
+  function saveLog() {
+    var now = new Date();
+    var date = [now.getFullYear(), pad(now.getMonth() + 1), pad(now.getDate())].join('');
+    var link = document.createElement('a');
+    link.href = URL.createObjectURL(new Blob([logLines.join('\r\n') + '\r\n'], { type: 'text/plain' }));
+    link.download = 'fastmile-demo-log-' + date + '-' + clock(now, '') + '.txt';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+
+  log(VERSION + ' opened on ' + location.pathname + location.hash);
 
   function show(message, color) {
     status.textContent = message;
@@ -140,21 +182,24 @@
     status.style.fontWeight = color ? 'bold' : 'normal';
   }
 
-  function report(name, state, note) {
+  // screenOnly is for parts of a serial or IMEI, which stay out of the log
+  function report(name, state, note, screenOnly) {
     var seconds = Math.round((Date.now() - started) / 1000);
     checks.push(name + ' ' + state + ' ' + seconds + 's');
+    log(name + ': ' + state + (note ? ' (' + note + ')' : ''));
     var row = rows.insertRow();
     row.insertCell().textContent = state;
     row.insertCell().textContent = name;
-    row.insertCell().textContent = note || '';
+    row.insertCell().textContent = screenOnly || note || '';
     row.cells[0].style.cssText = 'font-weight:bold;padding:2px 6px 2px 0;color:' +
       (state === 'PASS' ? '#0a7a2f' : state === 'FAIL' ? '#b00020' : '#555');
     return state === 'PASS' || state === 'INFO';
   }
 
   function matches(name, expected, actual) {
-    if (expected === actual) return report(name, 'PASS', lastFour(actual));
-    return report(name, 'FAIL', 'unit ' + lastFour(actual) + ', label ' + lastFour(expected));
+    if (expected === actual) return report(name, 'PASS', '', lastFour(actual));
+    return report(name, 'FAIL', 'does not match label',
+      'unit ' + lastFour(actual) + ', label ' + lastFour(expected));
   }
 
   function finish(overall, reason) {
@@ -163,10 +208,13 @@
       overall === 'PASS' ? '#0a7a2f' : '#b00020');
     result.value = [VERSION, overall, reason || '-', seconds + 's'].concat(checks).join(' | ');
     result.style.display = 'block';
+    log('RESULT: ' + overall + (reason ? ' - ' + reason : '') + ' in ' + seconds + 's');
+    saveLog();
   }
 
   // Returns false when the unit refused the label, which is not a failed unit
   async function logIn(label) {
+    log('looking for the login page');
     var user = await waitFor('the login page or a logged-in page', function () {
       return find('#username-login-value') || find('div.sidenav-logout');
     });
@@ -176,8 +224,10 @@
     }
     type(user, String(label.U));
     type(find('#passwordLoginAria'), String(label.P));
+    log('filled username and password');
     var button = await waitFor('the Sign in button', signInButton);
     button.click();
+    log('clicked Sign in');
     var outcome = await waitFor('the login to finish', function () {
       if (rejected()) return 'rejected';
       return find('div[role="button"].mapClickArea') ? 'in' : '';
@@ -190,12 +240,14 @@
   async function checkUnit(label) {
     var ok = true;
 
+    log('opening Cellular Status');
     location.hash = '#/wan/cellular-status';
     var imei = await waitFor('the IMEI', function () { return valueOf('IMEI'); });
     ok = matches('IMEI', String(label.IMEI), imei) && ok;
     var sim = await waitFor('the SIM status', function () { return valueOf('Status'); });
     ok = report('SIM', sim === 'Valid' ? 'PASS' : 'FAIL', sim) && ok;
 
+    log('opening Overview');
     location.hash = '#/overview';
     var map = await waitFor('the Network map', function () {
       return find('div[role="button"].mapClickArea');
@@ -207,6 +259,7 @@
       ok = report('Wi-Fi ' + band, /^Up/.test(state) ? 'PASS' : 'FAIL', state || 'not found') && ok;
     });
 
+    log('opening device details');
     map.click();
     var serial = await waitFor('the serial number', function () { return valueOf('Serial number'); });
     var name = valueOf('Device name');
@@ -230,6 +283,7 @@
       finish(await checkUnit(label) ? 'PASS' : 'FAIL');
     } catch (e) {
       report('Stopped', 'FAIL', e.message);
+      logPage();
       finish('FAIL', e.message);
     }
   }
@@ -244,9 +298,11 @@
     var missing = ['U', 'P', 'S', '23S', 'IMEI'].filter(function (key) { return !label[key]; });
     scan.value = '';
     if (missing.length) {
+      log('scan is missing ' + missing.join(', '));
       show('Label is missing ' + missing.join(', ') + '. Scan again.', '#b00020');
       return;
     }
+    log('label scanned, model field ' + String(label.N).slice(0, 20));
     run(label);
   });
 })();

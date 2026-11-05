@@ -185,3 +185,35 @@ def test_password_is_not_left_in_the_scan_box(router):
     tab = router()
     run_demo(tab)
     assert tab.input_value("#rt-scan") == ""
+
+
+def saved_log(tab):
+    with tab.expect_download() as download:
+        run_demo(tab)
+    path = download.value.path()
+    return download.value.suggested_filename, Path(path).read_text(encoding="utf-8")
+
+
+def test_log_file_is_saved_with_every_step(router):
+    name, log = saved_log(router())
+    assert name.startswith("fastmile-demo-log-") and name.endswith(".txt")
+    for step in ("clicked Sign in", "IMEI: PASS", "Serial: PASS", "RESULT: PASS"):
+        assert step in log
+
+
+def test_log_has_no_device_data(router):
+    _, log = saved_log(router(serial="OTHER-SERIAL"))
+    assert "RESULT: FAIL" in log
+    for secret in (LABEL["P"], LABEL["KY"], LABEL["S"], LABEL["IMEI"], LABEL["IMEI"][-4:], "SERIAL"):
+        assert secret not in log
+
+
+def test_log_says_where_a_stuck_run_stopped(router):
+    tab = router(loggedIn=True)
+    tab.evaluate(SOURCE.replace("var WAIT_MS = 30000", "var WAIT_MS = 1000"))
+    tab.evaluate("window.addEventListener('hashchange', () => { document.getElementById('app').innerHTML = '' })")
+    with tab.expect_download() as download:
+        tab.locator("#rt-scan").press_sequentially(json.dumps(LABEL))
+    log = Path(download.value.path()).read_text(encoding="utf-8")
+    assert 'label "IMEI": not on page' in log
+    assert "page: /web_whw/#/wan/cellular-status" in log
