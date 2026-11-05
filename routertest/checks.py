@@ -76,7 +76,7 @@ def check_factory_reset(page, unit: Unit, profile: dict) -> CheckResult:
         )
     with timed() as t:
         try:
-            admin.factory_reset(page, profile)
+            admin.factory_reset(page, unit, profile)
             ok, detail = True, "reset started"
         except Exception as e:
             ok, detail = False, f"reset failed: {_reason(e)}"
@@ -87,7 +87,7 @@ def check_identity(page, unit: Unit, profile: dict) -> CheckResult:
     """Device-reported serial/MAC/IMEI must match the QR label."""
     with timed() as t:
         try:
-            info = admin.read_device_info(page, profile)
+            info = admin.read_device_info(page, unit, profile)
         except Exception as e:
             info, error = None, f"could not read device info: {_reason(e)}"
 

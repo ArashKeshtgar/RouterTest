@@ -18,8 +18,9 @@ and MACs.** Keep raw material in `notes/private/` (git-ignored).
 - `container_management_status` (403) and a cancelled `wan_config_glb_status`
   appear on both models on a working page. Do not treat them as a fault.
 - Device details has no URL of its own; click the device on the Network map.
-  It shows serial, MAC, firmware, hardware version and the reset button - **no
-  IMEI**.
+  It shows serial, MAC, firmware, hardware version and the reset button. The
+  IMEI and SIM status are on WAN > Cellular Status.
+- A third family runs a different web app (`/login.lp`, footer says Vantiva).
 - Overview also shows the SSID, Wi-Fi bands up/down and 5G/4G status, so those
   checks can be read from the page. The 12 has 2.4/5/6 GHz, the 3.2 has 2.4/5.
 - The status words differ: "Not connected" on the 12, "Offline" and

@@ -33,13 +33,15 @@ OVERVIEW_HTML = """<!doctype html><title>Overview</title>
   <a id="device-card" href="/device">{model}</a>
 </div>"""
 
+CELLULAR_HTML = """<!doctype html><title>Cellular status</title>
+<p>IMEI: <span id="imei">{imei}</span></p>"""
+
 DEVICE_HTML = """<!doctype html><title>Device info</title>
 <div id="device-info">
   <h1>Device information</h1>
   <p>Model: <span id="model">{model}</span></p>
   <p>Serial number: <span id="serial">{serial}</span></p>
   <p>MAC: <span id="mac">{mac}</span></p>
-  <p>IMEI: <span id="imei">{imei}</span></p>
   <p>Firmware: <span id="firmware">{firmware}</span></p>
   <form method="post" action="/factory-reset">
     <button id="factory-reset" type="submit">Reset</button>
@@ -89,6 +91,12 @@ def create_app(
         if not session.get("auth"):
             return redirect("/")
         return OVERVIEW_HTML.format(**device)
+
+    @app.route("/cellular")
+    def cellular():
+        if not session.get("auth"):
+            return redirect("/")
+        return CELLULAR_HTML.format(**device)
 
     @app.route("/device")
     def device_info():

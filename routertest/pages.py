@@ -5,7 +5,7 @@ and the test flow does not change. The tool picks the profile from the model
 field (N) of the QR label.
 
 The FastMile models run the same web app (/web_whw/), so they share a base and
-each one overrides only what differs.
+each one overrides only what differs. Vantiva units run a different one.
 """
 
 PROFILES = {
@@ -16,22 +16,29 @@ PROFILES = {
         "submit": "#login-btn",
         "logged_in": "#overview",
         "login_error": "#error:not(:empty)",
+        "overview_path": "/overview",
         "open_details": "#device-card",
         "details": "#device-info",
         "fields": {
             "serial": "#serial",
             "mac": "#mac",
-            "imei": "#imei",
             "firmware": "#firmware",
         },
+        "cellular_path": "/cellular",
+        "cellular_fields": {"imei": "#imei"},
         "reset_button": "#factory-reset",
     },
 }
 
-# TODO: fill in from DevTools (Elements tab) on a real unit.
-# Do not guess - every value here must come from the real device.
+def _detail(label: str) -> str:
+    """Details values have no ids; each one follows its label."""
+    return f'div.text > pv-text:has(div:text-is("{label}")) + pv-text > div'
+
+
+# From page captures of real units. Do not guess - every value here must come
+# from the real device. TODO values are the ones not captured yet.
 _FASTMILE = {
-    "login_path": "/",
+    "login_path": "/web_whw/#/login",
     "username": "TODO",
     "password": "TODO",
     "submit": "TODO",
@@ -39,24 +46,28 @@ _FASTMILE = {
     # about 2 seconds, and its labels arrive later from en.json.
     "logged_in": "TODO",
     "login_error": "TODO",
+    "overview_path": "/web_whw/#/overview",
     # Device details has no URL of its own (still #/overview): click the device
     # on the Network map. Its Factory default > Reset button is on the same view.
     "open_details": "TODO",
-    "details": "TODO",
+    "details": "pv-text:has(div:text-is(\"Serial number\"))",
     "fields": {
-        "serial": "TODO",
-        "mac": "TODO",
-        "imei": "TODO",  # not on device details - try WAN > Cellular Status
-        "firmware": "TODO",
+        "serial": _detail("Serial number"),
+        "mac": _detail("MAC address"),
+        "firmware": _detail("Software version"),
     },
+    "cellular_path": "/web_whw/#/wan/cellular-status",
+    "cellular_fields": {"imei": "#imei-card div.right > pv-text > div"},
+    # Stays TODO on purpose: seen on the page, but its confirm dialog is unknown
+    # and clicking it needs the user's OK. The real run refuses until it is set.
     "reset_button": "TODO",
 }
 
-# From a page capture of a real Gateway 12. The buttons have no ids, so Sign in
-# and the error dialog are found by their English text.
+# The buttons have no ids, so Sign in and the error dialog are found by their
+# English text. The dialog counts failed logins, and the unit seems to lock after
+# about 3, so the tool only ever tries once per reset.
 PROFILES["fastmile_12"] = {
     **_FASTMILE,
-    "login_path": "/web_whw/#/login",
     "username": "#username-login-value",
     "password": "#passwordLoginAria",
     "submit": 'button[type="button"]:has-text("Sign in")',
@@ -64,8 +75,25 @@ PROFILES["fastmile_12"] = {
     "login_error": 'div:has-text("Invalid login credentials")',
     "open_details": 'div[role="button"].mapClickArea',
 }
-# Same web app, but not captured yet: nothing is copied from the 12 until it is
+# Same web app. Its login page and Network map are not captured yet.
 PROFILES["fastmile_3_2"] = {**_FASTMILE}
+
+# A different make and web app (footer says Vantiva). Which model it is: TODO.
+PROFILES["vantiva"] = {
+    "login_path": "/login.lp",
+    "username": "#srp_username",
+    "password": "#srp_password",
+    "submit": "#sign-me-in",
+    "logged_in": "#System_Info_tab",
+    "login_error": "#erroruserpass",
+    "overview_path": "TODO",
+    "open_details": "TODO",
+    "details": "TODO",
+    "fields": {"serial": "TODO", "mac": "TODO", "firmware": "TODO"},
+    "cellular_path": "TODO",
+    "cellular_fields": {"imei": "TODO"},
+    "reset_button": "TODO",
+}
 
 # Model field (N) of the QR label -> profile.
 # TODO: confirm 5G16-12W-A is the Gateway 12, and add the Gateway 3.2's label value.

@@ -46,26 +46,33 @@ def wait_until_up(
             page.wait_for_timeout(2_000)
 
 
-def factory_reset(page: Page, profile: dict) -> None:
-    open_details(page, profile)
+def factory_reset(page: Page, unit: Unit, profile: dict) -> None:
+    open_details(page, unit, profile)
     page.click(profile["reset_button"], timeout=TIMEOUT_MS)
 
 
-def open_details(page: Page, profile: dict) -> None:
+def open_details(page: Page, unit: Unit, profile: dict) -> None:
     """Device details is reached by clicking, it has no URL of its own."""
     if not page.is_visible(profile["details"]):
+        page.goto(unit.admin_url + profile["overview_path"], timeout=TIMEOUT_MS)
         page.click(profile["open_details"], timeout=TIMEOUT_MS)
     page.wait_for_selector(profile["details"], timeout=TIMEOUT_MS)
 
 
-def read_device_info(page: Page, profile: dict) -> dict:
-    open_details(page, profile)
+def _read_fields(page: Page, fields: dict) -> dict:
     info = {}
-    for name, selector in profile["fields"].items():
+    for name, selector in fields.items():
         # The real page draws empty placeholders first and fills them in later
         page.wait_for_selector(f"{selector}:not(:empty)", timeout=TIMEOUT_MS)
         info[name] = page.inner_text(selector).strip()
     return info
+
+
+def read_device_info(page: Page, unit: Unit, profile: dict) -> dict:
+    page.goto(unit.admin_url + profile["cellular_path"], timeout=TIMEOUT_MS)
+    info = _read_fields(page, profile["cellular_fields"])
+    open_details(page, unit, profile)
+    return {**info, **_read_fields(page, profile["fields"])}
 
 
 def normalize_mac(value: str) -> str:
