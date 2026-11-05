@@ -58,8 +58,8 @@ _NOKIA = {
     },
     "cellular_path": "/web_whw/#/wan/cellular-status",
     "cellular_fields": {"imei": "#imei-card div.right > pv-text > div"},
-    # Stays TODO on purpose: seen on the page, but its confirm dialog is unknown
-    # and clicking it needs the user's OK. The real run refuses until it is set.
+    # Stays TODO until its confirm dialog is captured. The real run refuses until
+    # it is set. The Chrome demo in browser/ does the reset on Gateway 12 already.
     "reset_button": "TODO",
 }
 

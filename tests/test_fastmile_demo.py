@@ -10,6 +10,15 @@ from playwright.sync_api import sync_playwright
 
 LABEL = json.loads(Path("samples/fake_label.json").read_text(encoding="utf-8"))
 SOURCE = Path("browser/fastmile_demo.js").read_text(encoding="utf-8")
+
+
+def fast(code):
+    return code.replace("var POLL_MS = 3000", "var POLL_MS = 50").replace(
+        "var SETTLE_MS = 20000", "var SETTLE_MS = 0"
+    )
+
+
+FAST = fast(SOURCE)
 ROUTER = "http://router.test/web_whw/"
 
 APP = """<!doctype html><title>Router</title>
@@ -18,7 +27,7 @@ APP = """<!doctype html><title>Router</title>
 <script>
 const app = document.getElementById('app');
 const unit = UNIT;
-window.signIns = 0; window.resets = 0; window.reboots = 0;
+window.signIns = 0; window.resets = 0; window.reboots = 0; window.cancels = 0;
 let loggedIn = unit.loggedIn;
 const detail = (k, v) => `<div class="left"><div class="text"><pv-text><div>${k}</div></pv-text>
   <pv-text><div>${v}</div></pv-text></div></div>`;
@@ -59,11 +68,19 @@ function overview() {
   }, 300);
 }
 function details() {
-  show(`<button id="rebootButton">Reboot</button><button id="factorydefaultbtn">Reset</button>` +
+  show(`<pv-button id="rebootButton"><button>Reboot</button></pv-button>
+    <pv-button id="factorydefaultbtn"><button>Reset</button></pv-button>` +
     detail('Device name', unit.name) + detail('Serial number', unit.serial) +
     detail('MAC address', unit.mac) + detail('Software version', '1.2.3'));
-  document.getElementById('factorydefaultbtn').onclick = () => window.resets++;
-  document.getElementById('rebootButton').onclick = () => window.reboots++;
+  document.querySelector('#factorydefaultbtn button').onclick = askToConfirm;
+  document.querySelector('#rebootButton button').onclick = () => window.reboots++;
+}
+function askToConfirm() {
+  const dialog = document.createElement('div');
+  dialog.innerHTML = `<button id="no">Cancel</button><button id="yes">${unit.confirm}</button>`;
+  app.appendChild(dialog);
+  document.getElementById('no').onclick = () => window.cancels++;
+  document.getElementById('yes').onclick = () => { window.resets++; loggedIn = false; fetch('/restart-now'); };
 }
 function cellular() {
   show(cell('Status', 'Valid') + '<pv-text id="imei-title"><div>IMEI</div></pv-text>' +
@@ -98,6 +115,7 @@ def unit(**changes):
         "name": "FastMile 5G Gateway 12",
         "signal": "Connected",
         "loggedIn": False,
+        "confirm": "Reset",
     }
     return {**values, **changes}
 
@@ -110,10 +128,17 @@ def router():
         def open_router(**changes):
             tab = browser.new_page()
             html = APP.replace("UNIT", json.dumps(unit(**changes)))
-            tab.route(
-                "http://router.test/**",
-                lambda r: r.fulfill(body=html, content_type="text/html"),
-            )
+            down = {"requests": 0}
+
+            def serve(route):
+                if route.request.url.endswith("/restart-now"):
+                    down["requests"] = 3
+                if down["requests"] and not route.request.url.endswith("/restart-now"):
+                    down["requests"] -= 1
+                    return route.abort()
+                return route.fulfill(body=html, content_type="text/html")
+
+            tab.route("http://router.test/**", serve)
             tab.goto(ROUTER + "#/login")
             return tab
 
@@ -121,7 +146,7 @@ def router():
         browser.close()
 
 
-def run_demo(tab, code=SOURCE):
+def run_demo(tab, code=FAST):
     tab.evaluate(code)
     # The scanner types like a keyboard and ends with Enter
     tab.locator("#rt-scan").press_sequentially(json.dumps(LABEL))
@@ -130,21 +155,47 @@ def run_demo(tab, code=SOURCE):
     return tab.input_value("#rt-result")
 
 
-def test_good_unit_passes_with_one_sign_in(router):
+def test_good_unit_passes_with_a_sign_in_each_side_of_the_reset(router):
     tab = router()
     assert " | PASS | " in run_demo(tab)
-    assert tab.evaluate("window.signIns") == 1
+    assert tab.evaluate("window.signIns") == 2
 
 
 def test_built_bookmarklet_runs(router):
     code = unquote(built_bookmarklet().removeprefix("javascript:"))
-    assert " | PASS | " in run_demo(router(), code)
+    assert " | PASS | " in run_demo(router(), fast(code))
 
 
-def test_never_touches_reset_or_reboot(router):
+def test_reset_comes_first_after_login(router):
+    tab = router()
+    result = run_demo(tab)
+    assert result.index("Factory reset PASS") < result.index("Back up PASS") < result.index("IMEI")
+    assert tab.evaluate("[window.resets, window.reboots, window.cancels]") == [1, 0, 0]
+
+
+def test_scanning_again_does_not_reset_twice(router):
     tab = router()
     run_demo(tab)
-    assert tab.evaluate("[window.resets, window.reboots]") == [0, 0]
+    assert " | PASS | " in run_demo(tab)
+    assert tab.evaluate("window.resets") == 1
+
+
+def test_hand_reset_unit_is_not_reset_again(router):
+    tab = router(password="changed-by-customer")
+    run_demo(tab)
+    assert "reload" in run_demo(tab)
+    tab.evaluate(f"unit.password = {json.dumps(LABEL['P'])}")
+    tab.evaluate("document.getElementById('err').innerHTML = ''")
+    assert " | PASS | " in run_demo(tab)
+    assert tab.evaluate("window.resets") == 0
+
+
+def test_unknown_confirm_button_is_not_guessed(router):
+    tab = router(confirm="Erase everything")
+    code = FAST.replace("var WAIT_MS = 30000", "var WAIT_MS = 3000")
+    result = run_demo(tab, code)
+    assert "CHECK RESET BY HAND" in result
+    assert tab.evaluate("[window.resets, window.cancels]") == [0, 0]
 
 
 def test_changed_password_tells_operator_to_reset_and_tries_once(router):
@@ -156,7 +207,7 @@ def test_changed_password_tells_operator_to_reset_and_tries_once(router):
 def test_already_logged_in_skips_sign_in(router):
     tab = router(loggedIn=True)
     assert " | PASS | " in run_demo(tab)
-    assert tab.evaluate("window.signIns") == 0
+    assert tab.evaluate("window.signIns") == 1
 
 
 @pytest.mark.parametrize(
@@ -188,10 +239,12 @@ def test_password_is_not_left_in_the_scan_box(router):
 
 
 def saved_log(tab):
-    with tab.expect_download() as download:
-        run_demo(tab)
-    path = download.value.path()
-    return download.value.suggested_filename, Path(path).read_text(encoding="utf-8")
+    downloads = []
+    tab.on("download", lambda d: downloads.append(d))
+    run_demo(tab)
+    tab.wait_for_timeout(500)
+    last = downloads[-1]
+    return last.suggested_filename, Path(last.path()).read_text(encoding="utf-8")
 
 
 def test_log_file_is_saved_with_every_step(router):
@@ -210,10 +263,10 @@ def test_log_has_no_device_data(router):
 
 def test_log_says_where_a_stuck_run_stopped(router):
     tab = router(loggedIn=True)
-    tab.evaluate(SOURCE.replace("var WAIT_MS = 30000", "var WAIT_MS = 1000"))
-    tab.evaluate("window.addEventListener('hashchange', () => { document.getElementById('app').innerHTML = '' })")
+    tab.evaluate(FAST.replace("var WAIT_MS = 30000", "var WAIT_MS = 1000"))
+    tab.add_style_tag(content=".mapClickArea { display: none }")
     with tab.expect_download() as download:
         tab.locator("#rt-scan").press_sequentially(json.dumps(LABEL))
     log = Path(download.value.path()).read_text(encoding="utf-8")
-    assert 'label "IMEI": not on page' in log
-    assert "page: /web_whw/#/wan/cellular-status" in log
+    assert "map on page: false" in log
+    assert "page: /web_whw/#/overview" in log

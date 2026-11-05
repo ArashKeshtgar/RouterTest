@@ -1,13 +1,22 @@
-// FastMile demo: scan the label, and the page logs in with it and checks the
-// unit against it. Runs in the router's own page and sends nothing anywhere. It
-// clicks only Sign in and the device on the Network map, tries the login once,
-// and never touches Reset, Reboot or a setting. The only thing it saves is a
-// .txt log in Downloads, which holds steps and times but no device data.
+// FastMile demo: scan the label, and the page logs in with it, factory resets the
+// unit first, logs in again and checks the unit against the label. Runs in the
+// router's own page and sends nothing anywhere. It clicks only Sign in, the device
+// on the Network map and Factory default > Reset, which also reboots the unit. It
+// tries each login once and changes no setting. It saves a .txt log in Downloads
+// with steps and times but no device data, and remembers in this tab, by the
+// serial's last 4, that a unit was already reset.
 (function () {
-  var VERSION = 'fastmile demo v2';
+  var VERSION = 'fastmile demo v4';
+  var RESET_KEY = 'rt-demo-reset';
+  var SETTLE_MS = 20000;
   var BOX_ID = 'rt-demo';
   var MODEL = 'FastMile 5G Gateway 12';
   var WAIT_MS = 30000;
+  var RESTART_START_MS = 60000;
+  var RESTART_END_MS = 300000;
+  var POLL_MS = 3000;
+  // The confirm dialog has not been captured yet, so its button is matched by word
+  var CONFIRM_WORDS = ['reset', 'factory reset', 'confirm', 'ok', 'okay', 'yes', 'continue', 'proceed'];
   var old = document.getElementById(BOX_ID);
   if (old) old.remove();
 
@@ -99,6 +108,16 @@
     return deep(document, []).filter(function (el) {
       return el.tagName === 'BUTTON' && text(el) === 'Sign in' && isVisible(el) && !el.disabled;
     })[0];
+  }
+
+  function visibleButtons() {
+    return deep(document, []).filter(function (el) {
+      return el.tagName === 'BUTTON' && isVisible(el);
+    });
+  }
+
+  function isMainResetButton(el) {
+    return !!up(el, function (e) { return e.id === 'factorydefaultbtn'; });
   }
 
   function rejected() {
@@ -212,16 +231,34 @@
     saveLog();
   }
 
+  // This tab survives a page reload, so a second scan does not reset twice
+  function alreadyReset(label) {
+    try {
+      return sessionStorage.getItem(RESET_KEY) === lastFour(label.S);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function rememberReset(label) {
+    try {
+      sessionStorage.setItem(RESET_KEY, lastFour(label.S));
+    } catch (e) {
+      log('could not remember the reset in this tab');
+    }
+  }
+
   // Returns false when the unit refused the label, which is not a failed unit
-  async function logIn(label) {
+  async function logIn(label, afterReset) {
     log('looking for the login page');
-    var user = await waitFor('the login page or a logged-in page', function () {
-      return find('#username-login-value') || find('div.sidenav-logout');
+    var user = await waitFor('the login page', function () {
+      return find('#username-login-value') || (!afterReset && find('div.sidenav-logout'));
     });
     if (user.matches('div.sidenav-logout')) {
       report('Login', 'INFO', 'already logged in');
       return true;
     }
+    if (rejected()) throw new Error('an old login error is on the page, reload it and scan again');
     type(user, String(label.U));
     type(find('#passwordLoginAria'), String(label.P));
     log('filled username and password');
@@ -237,6 +274,12 @@
     return true;
   }
 
+  function waitForMap() {
+    return waitFor('the Network map', function () {
+      return find('div[role="button"].mapClickArea');
+    });
+  }
+
   async function checkUnit(label) {
     var ok = true;
 
@@ -249,9 +292,7 @@
 
     log('opening Overview');
     location.hash = '#/overview';
-    var map = await waitFor('the Network map', function () {
-      return find('div[role="button"].mapClickArea');
-    });
+    var map = await waitForMap();
     var signal = await waitFor('the 5G status', function () { return textAfter(/^5G\+? Signal$/); });
     ok = report('5G', signal === 'Connected' ? 'PASS' : 'FAIL', signal) && ok;
     ['2.4', '5', '6'].forEach(function (band) {
@@ -270,21 +311,111 @@
     return ok;
   }
 
+  async function routerAnswers() {
+    var stop = new AbortController();
+    var timer = setTimeout(function () { stop.abort(); }, POLL_MS);
+    try {
+      await fetch(location.pathname, { cache: 'no-store', signal: stop.signal });
+      return true;
+    } catch (e) {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function waitForRouter(answering, ms, what) {
+    var end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (await routerAnswers() === answering) return;
+      await sleep(POLL_MS);
+    }
+    throw new Error(what);
+  }
+
+  function newButtons(before) {
+    return visibleButtons().filter(function (el) {
+      return before.indexOf(el) < 0 && !isMainResetButton(el);
+    });
+  }
+
+  function confirmButton(before) {
+    var fresh = newButtons(before);
+    for (var i = 0; i < CONFIRM_WORDS.length; i++) {
+      for (var j = 0; j < fresh.length; j++) {
+        if (text(fresh[j]).toLowerCase() === CONFIRM_WORDS[i]) return fresh[j];
+      }
+    }
+    return null;
+  }
+
+  async function factoryReset() {
+    if (!find('#factorydefaultbtn button')) {
+      log('opening device details for the reset');
+      location.hash = '#/overview';
+      (await waitForMap()).click();
+    }
+    var reset = await waitFor('the factory Reset button', function () {
+      return find('#factorydefaultbtn button');
+    });
+    var before = visibleButtons();
+    log('clicking Factory default > Reset');
+    reset.click();
+    var confirm;
+    try {
+      confirm = await waitFor('the reset confirm button', function () { return confirmButton(before); });
+    } catch (e) {
+      log('new buttons on page: ' + newButtons(before).map(text).join(', '));
+      throw e;
+    }
+    log('confirming with button "' + text(confirm) + '"');
+    // The page can die with the unit, so keep what is known so far
+    saveLog();
+    confirm.click();
+    report('Factory reset', 'PASS', 'confirmed');
+    show('Reset running, waiting for the unit to return...');
+    await waitForRouter(false, RESTART_START_MS, 'the unit did not restart after the reset');
+    log('unit went down');
+    await waitForRouter(true, RESTART_END_MS, 'the unit did not come back after the reset');
+    report('Back up', 'PASS');
+    // The web page answers before the login service is ready
+    await sleep(SETTLE_MS);
+  }
+
   async function run(label) {
+    var stage = 'testing';
     started = Date.now();
     scan.style.display = 'none';
     show('Testing, please wait...');
     try {
       if (!await logIn(label)) {
         report('Login', 'FAIL', 'label rejected');
-        finish('RESET BY HAND', 'previous customer changed the login');
+        rememberReset(label);
+        finish('RESET BY HAND', 'previous customer changed the login. Then scan again');
         return;
+      }
+      if (alreadyReset(label)) {
+        report('Factory reset', 'INFO', 'already reset');
+      } else {
+        stage = 'reset';
+        await factoryReset();
+        rememberReset(label);
+        stage = 'second login';
+        location.hash = '#/login';
+        if (!await logIn(label, true)) {
+          report('Login', 'FAIL', 'label rejected after reset');
+          finish('FAIL', 'label rejected after reset');
+          return;
+        }
+        stage = 'testing';
       }
       finish(await checkUnit(label) ? 'PASS' : 'FAIL');
     } catch (e) {
       report('Stopped', 'FAIL', e.message);
       logPage();
-      finish('FAIL', e.message);
+      var outcome = stage === 'reset' ? 'CHECK RESET BY HAND' :
+        stage === 'second login' ? 'RESET DONE, RELOAD AND SCAN AGAIN' : 'FAIL';
+      finish(outcome, e.message);
     }
   }
 
