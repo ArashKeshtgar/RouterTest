@@ -1,14 +1,17 @@
-// FastMile demo: scan the label, and the page logs in with it, factory resets the
-// unit first, logs in again and checks the unit against the label. Runs in the
-// router's own page and sends nothing anywhere. It clicks only Sign in, the device
-// on the Network map and Factory default > Reset, which also reboots the unit. It
-// tries each login once and changes no setting. It saves a .txt log in Downloads
-// with steps and times but no device data, and remembers in this tab, by the
-// serial's last 4, that a unit was already reset.
+// FastMile demo: scan the label, and the page logs in with it, checks the unit is
+// the one on the label, factory resets it, logs in again and runs the functional
+// tests. Runs in the router's own page and sends nothing anywhere. It clicks only
+// Sign in, the device on the Network map and Factory default > Reset, which also
+// reboots the unit. It tries each login once and changes no setting. It saves a
+// .txt log with steps and times but no device data, and a .json result in the
+// shape of the three OLP stations, which holds the IMEI that OLP files units under.
+// Nothing is sent to OLP. It also remembers in this tab, by the serial's last 4,
+// that a unit was already reset.
 (function () {
-  var VERSION = 'fastmile demo v4';
+  var VERSION = 'fastmile demo v5';
   var RESET_KEY = 'rt-demo-reset';
   var SETTLE_MS = 20000;
+  var CONNECT_MS = 120000;
   var BOX_ID = 'rt-demo';
   var MODEL = 'FastMile 5G Gateway 12';
   var WAIT_MS = 30000;
@@ -95,6 +98,23 @@
     throw new Error('timed out waiting for ' + what);
   }
 
+  // A freshly reset unit needs time to connect, so give a bad value time to change
+  async function settled(read, good) {
+    var end = Date.now() + CONNECT_MS;
+    var value = read();
+    while (!good(value) && Date.now() < end) {
+      await sleep(1000);
+      value = read();
+    }
+    return value;
+  }
+
+  function wifiName() {
+    var card = find('pv-wifi-card');
+    var names = leaves().filter(function (el) { return card && card.contains(el); });
+    return names.length ? text(names[0]) : '';
+  }
+
   function type(el, value) {
     var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
     el.focus();
@@ -143,19 +163,27 @@
     '<p id="rt-status" style="margin:8px 0">Scan the QR label now.</p>' +
     '<textarea id="rt-scan" rows="3" style="width:100%;box-sizing:border-box"></textarea>' +
     '<table id="rt-rows" style="width:100%;border-collapse:collapse"></table>' +
-    '<textarea id="rt-result" rows="4" readonly style="display:none;width:100%;box-sizing:border-box;margin-top:8px"></textarea>';
+    '<textarea id="rt-result" rows="4" readonly style="display:none;width:100%;box-sizing:border-box;margin-top:8px"></textarea>' +
+    '<label id="rt-visual-box" style="display:none;margin-top:8px">Visual check (ROUTER-REFURB) ' +
+    '<select id="rt-visual"><option>PENDING</option><option>PASS</option><option>FAIL-FAIL</option></select></label>';
   document.body.appendChild(box);
   var scan = box.querySelector('#rt-scan');
   var status = box.querySelector('#rt-status');
   var rows = box.querySelector('#rt-rows');
   var result = box.querySelector('#rt-result');
+  var visualBox = box.querySelector('#rt-visual-box');
+  var visual = box.querySelector('#rt-visual');
   box.querySelector('#rt-close').onclick = function () { box.remove(); };
   box.querySelector('#rt-save').onclick = function () { saveLog(); };
+  visual.onchange = function () { saveResult(); };
   scan.focus();
 
   var started = 0;
   var checks = [];
   var logLines = [];
+  var unit = null;
+  var wipe = { value: 'NOT-RUN', detail: '' };
+  var testing = 'NOT-RUN';
 
   function pad(number) {
     return String(number).padStart(2, '0');
@@ -182,15 +210,48 @@
     log('sign out on page: ' + !!find('div.sidenav-logout'));
   }
 
-  function saveLog() {
+  function saveFile(prefix, extension, type, content) {
     var now = new Date();
     var date = [now.getFullYear(), pad(now.getMonth() + 1), pad(now.getDate())].join('');
     var link = document.createElement('a');
-    link.href = URL.createObjectURL(new Blob([logLines.join('\r\n') + '\r\n'], { type: 'text/plain' }));
-    link.download = 'fastmile-demo-log-' + date + '-' + clock(now, '') + '.txt';
+    link.href = URL.createObjectURL(new Blob([content], { type: type }));
+    link.download = prefix + date + '-' + clock(now, '') + extension;
     document.body.appendChild(link);
     link.click();
     link.remove();
+  }
+
+  function saveLog() {
+    saveFile('fastmile-demo-log-', '.txt', 'text/plain', logLines.join('\r\n') + '\r\n');
+  }
+
+  // Same fields as the OLP history table, oldest station first
+  function saveResult() {
+    var when = new Date().toISOString();
+    var record = function (station, value, detail) {
+      return {
+        TransactionType: station,
+        FieldKey: 'RESULT',
+        FieldValue: value,
+        Status: unit.PN || '',
+        TransactionDate: when,
+        Detail: detail
+      };
+    };
+    saveFile('olp-result-', '.json', 'application/json', JSON.stringify({
+      Tool: VERSION,
+      Note: 'Demo output. Not sent to OLP.',
+      SerialNumber: String(unit.IMEI),
+      PartNumber: unit.PN || '',
+      Model: unit.N || '',
+      Seconds: Math.round((Date.now() - started) / 1000),
+      Checks: checks,
+      Transactions: [
+        record('ROUTER-DATA-WIPE', wipe.value, wipe.detail),
+        record('ROUTER-TESTING', testing, ''),
+        record('ROUTER-REFURB', visual.value, 'Visual check by the operator')
+      ]
+    }, null, 2) + '\n');
   }
 
   log(VERSION + ' opened on ' + location.pathname + location.hash);
@@ -228,7 +289,10 @@
     result.value = [VERSION, overall, reason || '-', seconds + 's'].concat(checks).join(' | ');
     result.style.display = 'block';
     log('RESULT: ' + overall + (reason ? ' - ' + reason : '') + ' in ' + seconds + 's');
+    log('stations: DATA-WIPE ' + wipe.value + ', TESTING ' + testing + ', REFURB ' + visual.value);
     saveLog();
+    saveResult();
+    visualBox.style.display = 'block';
   }
 
   // This tab survives a page reload, so a second scan does not reset twice
@@ -280,6 +344,25 @@
     });
   }
 
+  async function openDetails() {
+    if (!find('#factorydefaultbtn button')) {
+      log('opening device details');
+      location.hash = '#/overview';
+      (await waitForMap()).click();
+    }
+  }
+
+  async function checkIdentity(label) {
+    await openDetails();
+    var serial = await waitFor('the serial number', function () { return valueOf('Serial number'); });
+    var name = valueOf('Device name');
+    var ok = report('Model', name === MODEL ? 'PASS' : 'FAIL', name);
+    ok = matches('Serial', String(label.S), serial) && ok;
+    ok = matches('MAC', normalMac(label['23S']), normalMac(valueOf('MAC address'))) && ok;
+    report('Software', 'INFO', valueOf('Software version'));
+    return ok;
+  }
+
   async function checkUnit(label) {
     var ok = true;
 
@@ -287,27 +370,29 @@
     location.hash = '#/wan/cellular-status';
     var imei = await waitFor('the IMEI', function () { return valueOf('IMEI'); });
     ok = matches('IMEI', String(label.IMEI), imei) && ok;
-    var sim = await waitFor('the SIM status', function () { return valueOf('Status'); });
-    ok = report('SIM', sim === 'Valid' ? 'PASS' : 'FAIL', sim) && ok;
+    var sim = await settled(function () { return valueOf('Status'); }, function (value) {
+      return value === 'Valid';
+    });
+    ok = report('SIM', sim === 'Valid' ? 'PASS' : 'FAIL', sim || 'not found') && ok;
 
     log('opening Overview');
     location.hash = '#/overview';
-    var map = await waitForMap();
-    var signal = await waitFor('the 5G status', function () { return textAfter(/^5G\+? Signal$/); });
-    ok = report('5G', signal === 'Connected' ? 'PASS' : 'FAIL', signal) && ok;
-    ['2.4', '5', '6'].forEach(function (band) {
-      var state = textAfter(new RegExp('^WiFi ' + band.replace('.', '\\.') + ' GHz$'));
-      ok = report('Wi-Fi ' + band, /^Up/.test(state) ? 'PASS' : 'FAIL', state || 'not found') && ok;
+    await waitForMap();
+    var signal = await settled(function () { return textAfter(/^5G\+? Signal$/); }, function (value) {
+      return value === 'Connected';
     });
-
-    log('opening device details');
-    map.click();
-    var serial = await waitFor('the serial number', function () { return valueOf('Serial number'); });
-    var name = valueOf('Device name');
-    ok = report('Model', name === MODEL ? 'PASS' : 'FAIL', name) && ok;
-    ok = matches('Serial', String(label.S), serial) && ok;
-    ok = matches('MAC', normalMac(label['23S']), normalMac(valueOf('MAC address'))) && ok;
-    report('Software', 'INFO', valueOf('Software version'));
+    ok = report('5G', signal === 'Connected' ? 'PASS' : 'FAIL', signal || 'not found') && ok;
+    var bands = ['2.4', '5', '6'];
+    for (var i = 0; i < bands.length; i++) {
+      var pattern = new RegExp('^WiFi ' + bands[i].replace('.', '\\.') + ' GHz$');
+      var state = await settled(function () { return textAfter(pattern); }, function (value) {
+        return /^Up/.test(value);
+      });
+      ok = report('Wi-Fi ' + bands[i], /^Up/.test(state) ? 'PASS' : 'FAIL', state || 'not found') && ok;
+    }
+    var expected = String(label.ID);
+    var name = await settled(wifiName, function (value) { return value === expected; });
+    ok = report('Wi-Fi name', name === expected ? 'PASS' : 'FAIL', name === expected ? '' : 'does not match label') && ok;
     return ok;
   }
 
@@ -350,11 +435,7 @@
   }
 
   async function factoryReset() {
-    if (!find('#factorydefaultbtn button')) {
-      log('opening device details for the reset');
-      location.hash = '#/overview';
-      (await waitForMap()).click();
-    }
+    await openDetails();
     var reset = await waitFor('the factory Reset button', function () {
       return find('#factorydefaultbtn button');
     });
@@ -384,6 +465,7 @@
 
   async function run(label) {
     var stage = 'testing';
+    unit = label;
     started = Date.now();
     scan.style.display = 'none';
     show('Testing, please wait...');
@@ -391,11 +473,18 @@
       if (!await logIn(label)) {
         report('Login', 'FAIL', 'label rejected');
         rememberReset(label);
+        wipe.detail = 'Operator to reset by hand';
         finish('RESET BY HAND', 'previous customer changed the login. Then scan again');
+        return;
+      }
+      if (!await checkIdentity(label)) {
+        testing = 'FAIL';
+        finish('FAIL', 'unit does not match the label, not reset');
         return;
       }
       if (alreadyReset(label)) {
         report('Factory reset', 'INFO', 'already reset');
+        wipe = { value: 'PASS', detail: 'Reset before this run' };
       } else {
         stage = 'reset';
         await factoryReset();
@@ -404,15 +493,20 @@
         location.hash = '#/login';
         if (!await logIn(label, true)) {
           report('Login', 'FAIL', 'label rejected after reset');
+          wipe = { value: 'FAIL', detail: 'Label rejected after reset' };
           finish('FAIL', 'label rejected after reset');
           return;
         }
+        wipe = { value: 'PASS', detail: 'Reset, then logged in with the label' };
         stage = 'testing';
       }
-      finish(await checkUnit(label) ? 'PASS' : 'FAIL');
+      testing = await checkUnit(label) ? 'PASS' : 'FAIL';
+      finish(testing);
     } catch (e) {
       report('Stopped', 'FAIL', e.message);
       logPage();
+      if (stage === 'testing') testing = 'FAIL';
+      else wipe = { value: 'FAIL', detail: e.message };
       var outcome = stage === 'reset' ? 'CHECK RESET BY HAND' :
         stage === 'second login' ? 'RESET DONE, RELOAD AND SCAN AGAIN' : 'FAIL';
       finish(outcome, e.message);

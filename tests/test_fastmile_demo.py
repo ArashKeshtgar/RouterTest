@@ -13,9 +13,13 @@ SOURCE = Path("browser/fastmile_demo.js").read_text(encoding="utf-8")
 
 
 def fast(code):
-    return code.replace("var POLL_MS = 3000", "var POLL_MS = 50").replace(
-        "var SETTLE_MS = 20000", "var SETTLE_MS = 0"
-    )
+    for old, new in (
+        ("var POLL_MS = 3000", "var POLL_MS = 50"),
+        ("var SETTLE_MS = 20000", "var SETTLE_MS = 0"),
+        ("var CONNECT_MS = 120000", "var CONNECT_MS = 1000"),
+    ):
+        code = code.replace(old, new)
+    return code
 
 
 FAST = fast(SOURCE)
@@ -63,7 +67,9 @@ function overview() {
       <div>5G+ Signal</div><div>${unit.signal}</div><div>RSRP</div><div>-82 dBm</div>
       <div>WiFi 2.4 GHz</div><div>Up, Auto</div><div>Channel 11</div>
       <div>WiFi 5 GHz</div><div>Up, Auto</div><div>Channel 64</div>
-      <div>WiFi 6 GHz</div><div>Up, Auto</div><div>Channel 37</div>`);
+      <div>WiFi 6 GHz</div><div>Up, Auto</div><div>Channel 37</div>
+      <pv-wifi-card class="home-wifi--card"><div>${unit.ssid}</div>
+        <div>Home Network - 2.4 GHz / 5 GHz / 6 GHz</div></pv-wifi-card>`);
     document.querySelector('.mapClickArea').onclick = details;
   }, 300);
 }
@@ -114,6 +120,7 @@ def unit(**changes):
         "imei": LABEL["IMEI"],
         "name": "FastMile 5G Gateway 12",
         "signal": "Connected",
+        "ssid": LABEL["ID"],
         "loggedIn": False,
         "confirm": "Reset",
     }
@@ -166,11 +173,24 @@ def test_built_bookmarklet_runs(router):
     assert " | PASS | " in run_demo(router(), fast(code))
 
 
-def test_reset_comes_first_after_login(router):
+def test_order_is_identity_then_reset_then_functional(router):
     tab = router()
     result = run_demo(tab)
-    assert result.index("Factory reset PASS") < result.index("Back up PASS") < result.index("IMEI")
+    steps = ["Serial PASS", "Factory reset PASS", "Back up PASS", "Login PASS", "IMEI PASS"]
+    places = [result.rindex(step) if step == "Login PASS" else result.index(step) for step in steps]
+    assert places == sorted(places)
     assert tab.evaluate("[window.resets, window.reboots, window.cancels]") == [1, 0, 0]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"serial": "OTHER-SERIAL"}, {"mac": "AA:BB:CC:DD:EE:FF"}, {"name": "FastMile 5G Gateway 3.2"}],
+)
+def test_wrong_identity_is_never_reset(router, change):
+    tab = router(**change)
+    assert "not reset" in run_demo(tab)
+    assert tab.evaluate("window.resets") == 0
+    assert tab.locator("#no").count() == 0
 
 
 def test_scanning_again_does_not_reset_twice(router):
@@ -218,6 +238,7 @@ def test_already_logged_in_skips_sign_in(router):
         ({"mac": "AA:BB:CC:DD:EE:FF"}, "MAC FAIL"),
         ({"name": "FastMile 5G Gateway 3.2"}, "Model FAIL"),
         ({"signal": "Disconnected"}, "5G FAIL"),
+        ({"ssid": "Customer changed this"}, "Wi-Fi name FAIL"),
     ],
 )
 def test_wrong_unit_fails_the_right_row(router, change, row):
@@ -238,13 +259,51 @@ def test_password_is_not_left_in_the_scan_box(router):
     assert tab.input_value("#rt-scan") == ""
 
 
-def saved_log(tab):
+def saved_file(tab, prefix):
     downloads = []
     tab.on("download", lambda d: downloads.append(d))
     run_demo(tab)
     tab.wait_for_timeout(500)
-    last = downloads[-1]
+    last = [d for d in downloads if d.suggested_filename.startswith(prefix)][-1]
     return last.suggested_filename, Path(last.path()).read_text(encoding="utf-8")
+
+
+def saved_log(tab):
+    return saved_file(tab, "fastmile-demo-log-")
+
+
+def stations(tab):
+    name, content = saved_file(tab, "olp-result-")
+    assert name.endswith(".json")
+    data = json.loads(content)
+    assert data["SerialNumber"] == LABEL["IMEI"]
+    assert LABEL["P"] not in content and LABEL["KY"] not in content
+    return [(t["TransactionType"], t["FieldKey"], t["FieldValue"]) for t in data["Transactions"]]
+
+
+def test_json_has_the_three_stations_after_a_pass(router):
+    assert stations(router()) == [
+        ("ROUTER-DATA-WIPE", "RESULT", "PASS"),
+        ("ROUTER-TESTING", "RESULT", "PASS"),
+        ("ROUTER-REFURB", "RESULT", "PENDING"),
+    ]
+
+
+def test_json_after_a_functional_fail_keeps_the_wipe(router):
+    assert [s[2] for s in stations(router(signal="Disconnected"))] == ["PASS", "FAIL", "PENDING"]
+
+
+def test_json_after_wrong_identity_shows_no_wipe(router):
+    assert [s[2] for s in stations(router(serial="OTHER-SERIAL"))] == ["NOT-RUN", "FAIL", "PENDING"]
+
+
+def test_visual_check_choice_goes_in_a_new_json(router):
+    tab = router()
+    run_demo(tab)
+    with tab.expect_download() as download:
+        tab.select_option("#rt-visual", "PASS")
+    data = json.loads(Path(download.value.path()).read_text(encoding="utf-8"))
+    assert data["Transactions"][2]["FieldValue"] == "PASS"
 
 
 def test_log_file_is_saved_with_every_step(router):

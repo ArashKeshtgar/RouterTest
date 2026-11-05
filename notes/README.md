@@ -29,6 +29,11 @@ and MACs.** Keep raw material in `notes/private/` (git-ignored).
   `#wwan_ip`; Vantiva has `#Wireless_tab` and `#mobileWwanIp`.
 - WAN > Cellular Status has its own Reset, for the data counter. It is not the
   factory reset.
+- The FastMile demo saves `olp-result-*.json` with one record per OLP station, in
+  the fields of OLP's history table (TransactionType, FieldKey, FieldValue,
+  Status, TransactionDate). OLP lists units by IMEI. Nothing is sent to OLP; a
+  real link needs IT's approval. The FieldValue for a Testing failure and for a
+  Refurb pass are not confirmed.
 - Vantiva settings open as pop-ups from the dashboard cards, with no URL of
   their own. Factory reset is System Info > Configuration on both models.
 - Overview also shows the SSID, Wi-Fi bands up/down and 5G/4G status, so those
