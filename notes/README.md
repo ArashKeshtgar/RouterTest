@@ -70,9 +70,10 @@ Right-click each item -> Inspect -> note its `id` or a unique attribute:
 ## 4. Other
 - [ ] Public listings say label N 5G31-03W-B is the Gateway 12 and 5G16-12W-A the
   Gateway 3.2. Confirm both on real units.
-- [ ] Why did the bench show `/login` with no `#username-login-value`, when the
-  Gateway 12's login is `/web_whw/#/login`? Demo v8 opens that address itself and
-  logs the page, the PC id and the Chrome version, so its first run should tell.
+- The first bench runs (2026-11-05) never reached a router: the bookmark was
+  clicked on another site's login page. The log kept only the path `/login`. Logs
+  now keep the address, and off a private address the demo goes to 192.168.1.1
+  without starting.
 - [ ] Does the router allow its page inside the station (X-Frame-Options)? If not,
   v8 runs it in the first tab, as a background tab, which is less tested.
 - [ ] Does the 3.2's label have the same JSON QR?

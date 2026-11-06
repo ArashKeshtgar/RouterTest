@@ -1,6 +1,6 @@
 """The FastMile test station, run on a copy of the real page's structure. The login,
-overview, details and cellular pages follow the Gateway 12 captures v1 to v5, and
-/login is what the bench logs showed on 2026-11-05: an answer with no login box.
+overview, details and cellular pages follow the Gateway 12 captures v1 to v5.
+The router's own address redirects to its login page, as the operator sees it.
 The reset confirm dialog and the restart timing are still guesses."""
 
 import importlib.util
@@ -130,8 +130,7 @@ window.addEventListener('hashchange', route);
 route();
 </script>"""
 
-# All the bench logs say about /login: it answers, with none of the fields or labels
-BENCH_LOGIN_PAGE = "<title>Router</title><p>Please wait</p>"
+OTHER_ROUTER_PAGE = "<title>Router</title><p>Please wait</p>"
 UNREADY_PAGE = '<title>x</title><p>Starting up 12345</p><input id="other-user" value="secret-value">'
 
 
@@ -170,6 +169,8 @@ class Bench:
         self.off = False
         self.block_frames = block_frames
         self.page_html = None
+        self.home = "/web_whw/#/login"
+        self.login_page = OTHER_ROUTER_PAGE
         self.downloads = []
         self.context = context
         self.station = None
@@ -208,8 +209,14 @@ class Bench:
             request.close_connection = True
             request.connection.shutdown(socket.SHUT_RDWR)
             return
+        elif request.path == "/":
+            request.send_response(302)
+            request.send_header("Location", self.home)
+            request.send_header("Content-Length", "0")
+            request.end_headers()
+            return
         else:
-            page = BENCH_LOGIN_PAGE if request.path == "/login" else self.page_html
+            page = self.login_page if request.path == "/login" else self.page_html
             body = (page or APP.replace("UNIT", json.dumps(self.state))).encode("utf-8")
         request.send_response(200)
         request.send_header("Content-Type", "text/html; charset=utf-8")
@@ -277,7 +284,9 @@ def test_station_opens_in_its_own_tab_with_the_router_inside(router):
     station = bench.open_station()
     assert station.title() == "Router test station"
     station.wait_for_selector("#rt-link.up")
-    assert "/web_whw/" in station.get_attribute("#rt-frame", "src")
+    assert station.get_attribute("#rt-frame", "src") == bench.address + "/"
+    station.wait_for_function(
+        "document.getElementById('rt-frame').contentWindow.location.pathname === '/web_whw/'")
     assert bench.first.url.startswith(bench.address)
 
 
@@ -287,6 +296,19 @@ def test_opening_the_bookmark_again_keeps_the_same_station(router):
     bench.first.evaluate(FAST)
     bench.station.wait_for_timeout(200)
     assert len(bench.context.pages) == 2
+
+
+def test_on_another_site_it_goes_to_the_router_and_does_not_start(router):
+    bench = router()
+    messages = []
+    bench.first.on("dialog", lambda d: (messages.append(d.message), d.dismiss()))
+    bench.context.route("http://192.168.1.1/", lambda r: r.fulfill(body="router", content_type="text/html"))
+    bench.first.goto(bench.address.replace("127.0.0.1", "localhost") + "/web_whw/#/login")
+    with bench.first.expect_navigation():
+        bench.first.evaluate(FAST)
+    assert "click the bookmark again" in messages[0]
+    assert bench.first.url == "http://192.168.1.1/"
+    assert len(bench.context.pages) == 1
 
 
 def test_blocked_pop_up_takes_over_the_tab(router):
@@ -299,11 +321,20 @@ def test_blocked_pop_up_takes_over_the_tab(router):
     assert " | PASS | " in bench.run()
 
 
-def test_opened_on_the_bench_login_page_it_finds_the_real_login(router):
+def test_opened_on_another_router_page_it_finds_the_login(router):
     bench = router()
     bench.first.goto(bench.address + "/login")
     assert " | PASS | " in bench.run()
     assert "opened from /login" in bench.log()
+
+
+def test_router_address_that_leads_nowhere_falls_back_to_the_known_login(router):
+    bench = router()
+    bench.home = "/login"
+    assert " | PASS | " in bench.run(FAST.replace("var REOPEN_MS = 500", "var REOPEN_MS = 200"))
+    log = bench.log()
+    assert "no login box on page /login" in log
+    assert "open " + bench.address + "/web_whw/#/login" in log
 
 
 def test_buttons_of_the_reset_dialog_are_written_down(router):
@@ -356,7 +387,7 @@ def test_page_without_a_login_box_says_what_it_saw(router):
     log = bench.log()
     assert 'field: input id="other-user" type="text"' in log
     assert "page text: Starting up ***" in log
-    assert "opening the page again" in log
+    assert "no login box on page" in log
     assert "secret-value" not in log
     for fact in ("PC id ", "Chrome/", bench.address):
         assert fact in log

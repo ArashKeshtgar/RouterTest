@@ -12,7 +12,7 @@
 (function () {
   function main(win, origin) {
     var document = win.document;
-    var VERSION = 'fastmile demo v8';
+    var VERSION = 'fastmile demo v9';
     win.RT_VERSION = VERSION;
     // OLP's two results for every station are PASS and this
     var OLP_FAIL = 'FAIL-FAIL';
@@ -23,8 +23,9 @@
     var MODEL = 'FastMile 5G Gateway 12';
     var LABEL_NAMES = { '5G31-03W-B': 'Gateway 12 FastMile', '5G16-12W-A': 'Gateway 3.2 5G' };
     var OTHER_MODELS = ['5G16-12W-A'];
-    var APP_PATH = '/web_whw/';
-    var LOGIN_HASH = '#/login';
+    // The router's own address sends it to its login page. The second is what the
+    // captures showed, tried if the first brings up no login box
+    var ADDRESSES = ['/', '/web_whw/#/login'];
     var POLL_MS = 3000;
     var PAGE_MS = 500;
     var ANSWER_MS = 2500;
@@ -153,6 +154,7 @@
     var useOpener = false;
     var unreadable = 0;
     var stalePage = null;
+    var addressIndex = 0;
     var greenSeen = false;
     var link = { up: null, status: 0, since: Date.now(), checked: 0, drops: 0 };
 
@@ -345,8 +347,10 @@
     }
 
     function openRouter() {
-      var address = origin + APP_PATH + '?t=' + Date.now() + LOGIN_HASH;
+      var address = origin + ADDRESSES[addressIndex % ADDRESSES.length];
+      addressIndex++;
       stalePage = routerDocument();
+      log('TRYING', 'open ' + address);
       if (useOpener) win.opener.location.href = address;
       else frame.src = address;
     }
@@ -487,6 +491,12 @@
       });
     }
 
+    function loginBoxes() {
+      var user = find('#username-login-value');
+      var pass = find('#passwordLoginAria');
+      return user && pass ? { user: user, pass: pass } : null;
+    }
+
     function signInButton() {
       return allElements().filter(function (el) {
         return el.tagName === 'BUTTON' && text(el) === 'Sign in' && isVisible(el) && !el.disabled;
@@ -548,7 +558,7 @@
       var stop = new AbortController();
       var timer = setTimeout(function () { stop.abort(); }, ANSWER_MS);
       try {
-        var answer = await fetch(origin + APP_PATH, { cache: 'no-store', signal: stop.signal });
+        var answer = await fetch(origin + '/', { cache: 'no-store', mode: 'no-cors', signal: stop.signal });
         return answer.status || 1;
       } catch (e) {
         return 0;
@@ -617,14 +627,14 @@
     async function waitForRouter(afterReset) {
       var end = Date.now() + READY_MS;
       var opened = Date.now();
-      log('TRYING', 'open ' + APP_PATH + LOGIN_HASH + ' and wait for the login box');
+      addressIndex = 0;
       openRouter();
       while (Date.now() < end) {
         checkPageIsReadable();
-        var box = find('#username-login-value');
-        if (box) {
+        var boxes = loginBoxes();
+        if (boxes) {
           log('SAW', 'login box found after ' + Math.round((Date.now() - stepStarted) / 1000) + 's, page ' + routerPage());
-          return box;
+          return boxes;
         }
         if (!afterReset && find('div.sidenav-logout')) {
           log('SAW', 'already logged in');
@@ -634,7 +644,7 @@
         explain(link.up ? 'Router answers, waiting for the login box (' + waited + 's)' :
           'No answer yet, trying every few seconds (' + waited + 's)');
         if (link.up && Date.now() - opened > REOPEN_MS) {
-          log('TRYING', 'login box still missing, opening the page again');
+          log('SAW', 'no login box on page ' + routerPage());
           opened = Date.now();
           openRouter();
         }
@@ -647,16 +657,16 @@
 
     // Returns false when the unit refused the label, which is not a failed unit
     async function logIn(label, afterReset) {
-      var user = await waitForRouter(afterReset);
+      var boxes = await waitForRouter(afterReset);
       setStep('link', 'done');
-      if (!user) {
+      if (!boxes) {
         begin(afterReset ? 'login2' : 'login', 'Already logged in.');
         report('Login', 'INFO', 'already logged in');
         return true;
       }
       begin(afterReset ? 'login2' : 'login', 'Typing the username and password from the label.');
-      type(user, String(label.U));
-      type(find('#passwordLoginAria'), String(label.P));
+      type(boxes.user, String(label.U));
+      type(boxes.pass, String(label.P));
       log('TRYING', 'filled username and password');
       var button = await waitFor('the Sign in button', signInButton);
       button.click();
@@ -1048,6 +1058,13 @@
     scan.focus();
   }
 
+  // The label's password must never go into another site's login page. Routers
+  // are always on a private address
+  if (!/^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.|127\.)/.test(location.hostname)) {
+    alert('This is not the router page. Going to 192.168.1.1 now. When the router page opens, click the bookmark again.');
+    location.href = 'http://192.168.1.1/';
+    return;
+  }
   var openedOn = location.pathname + location.hash;
   var origin = location.origin;
   var station = window.open('', 'rt-station');
