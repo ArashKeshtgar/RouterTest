@@ -112,11 +112,12 @@ PROFILES["condo"] = {
     "login_error": "TODO",
 }
 
-# Model field (N) of the QR label -> profile.
-# TODO: confirm 5G16-12W-A is the Gateway 12, and add the label values of the
-# Gateway 3.2 and both Vantiva models.
+# Model field (N) of the QR label -> profile. These two come from public listings
+# (FCC, Wi-Fi Alliance, manuals), not from the labels on the bench.
+# TODO: confirm both on real labels, and add the label values of both Vantiva models.
 MODELS = {
-    "5G16-12W-A": "gateway_12_fastmile",
+    "5G31-03W-B": "gateway_12_fastmile",
+    "5G16-12W-A": "gateway_3_2_5g",
 }
 
 

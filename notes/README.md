@@ -29,7 +29,7 @@ and MACs.** Keep raw material in `notes/private/` (git-ignored).
   `#wwan_ip`; Vantiva has `#Wireless_tab` and `#mobileWwanIp`.
 - WAN > Cellular Status has its own Reset, for the data counter. It is not the
   factory reset.
-- The FastMile demo saves `olp-result-*.json` with one record per OLP station, in
+- The FastMile demo saves `DO-NOT-UPLOAD-olp-result-*.json` with one record per OLP station, in
   the fields of OLP's history table (TransactionType, FieldKey, FieldValue,
   Status, TransactionDate). OLP lists units by IMEI, and a station's result is
   PASS or FAIL-FAIL. Nothing is sent to OLP; a real link needs IT's approval.
@@ -68,10 +68,13 @@ Right-click each item -> Inspect -> note its `id` or a unique attribute:
 | Whole unit, start to finish | |
 
 ## 4. Other
-- [ ] Label model field (N) of the Gateway 3.2; is 5G16-12W-A the Gateway 12?
-- [ ] Which model is the label N 5G31-03W-B? On the bench its login page was
-  `/login`, not the Gateway 12's `/web_whw/#/login`, and it has no
-  `#username-login-value`. That login page is not captured yet.
+- [ ] Public listings say label N 5G31-03W-B is the Gateway 12 and 5G16-12W-A the
+  Gateway 3.2. Confirm both on real units.
+- [ ] Why did the bench show `/login` with no `#username-login-value`, when the
+  Gateway 12's login is `/web_whw/#/login`? Demo v8 opens that address itself and
+  logs the page, the PC id and the Chrome version, so its first run should tell.
+- [ ] Does the router allow its page inside the station (X-Frame-Options)? If not,
+  v8 runs it in the first tab, as a background tab, which is less tested.
 - [ ] Does the 3.2's label have the same JSON QR?
 - [ ] Does the unit lock the login after failed attempts? After how many?
 - [ ] Does a freshly reset unit accept the label password, or force a new one?

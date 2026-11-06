@@ -111,7 +111,7 @@ def test_label_mismatch_fails_identity(mock_url):
 
 def test_real_profile_refuses_until_filled_in():
     with pytest.raises(NotImplementedError):
-        pages.for_model("5G16-12W-A")
+        pages.for_model("5G31-03W-B")
 
 
 def test_unknown_model_is_refused():
