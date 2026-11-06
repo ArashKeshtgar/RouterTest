@@ -8,7 +8,7 @@
 // Nothing is sent to OLP. It also remembers in this tab, by the serial's last 4,
 // that a unit was already reset.
 (function () {
-  var VERSION = 'fastmile demo v6';
+  var VERSION = 'fastmile demo v7';
   // OLP's two results for every station are PASS and this
   var OLP_FAIL = 'FAIL-FAIL';
   var RESET_KEY = 'rt-demo-reset';
@@ -17,6 +17,7 @@
   var BOX_ID = 'rt-demo';
   var MODEL = 'FastMile 5G Gateway 12';
   var WAIT_MS = 30000;
+  var LOGIN_WAIT_MS = 90000;
   var RESTART_START_MS = 60000;
   var RESTART_END_MS = 300000;
   var POLL_MS = 3000;
@@ -90,8 +91,8 @@
     return new Promise(function (done) { setTimeout(done, ms); });
   }
 
-  async function waitFor(what, read) {
-    var end = Date.now() + WAIT_MS;
+  async function waitFor(what, read, ms) {
+    var end = Date.now() + (ms || WAIT_MS);
     while (Date.now() < end) {
       var value = read();
       if (value) return value;
@@ -208,6 +209,12 @@
       var state = !seen ? 'not on page' : valueOf(label) ? 'has a value' : 'no value found';
       log('label "' + label + '": ' + state);
     });
+    // Ids and types only: never what a field holds
+    deep(document, []).forEach(function (el) {
+      if (el.tagName !== 'INPUT' && el.tagName !== 'IFRAME') return;
+      log('field: ' + el.tagName.toLowerCase() + ' id="' + el.id + '" type="' + (el.type || '') +
+        '" name="' + (el.name || '') + '" visible=' + isVisible(el));
+    });
     log('map on page: ' + !!find('div[role="button"].mapClickArea'));
     log('sign out on page: ' + !!find('div.sidenav-logout'));
   }
@@ -319,7 +326,7 @@
     log('looking for the login page');
     var user = await waitFor('the login page', function () {
       return find('#username-login-value') || (!afterReset && find('div.sidenav-logout'));
-    });
+    }, LOGIN_WAIT_MS);
     if (user.matches('div.sidenav-logout')) {
       report('Login', 'INFO', 'already logged in');
       return true;
@@ -334,7 +341,7 @@
     var outcome = await waitFor('the login to finish', function () {
       if (rejected()) return 'rejected';
       return find('div[role="button"].mapClickArea') ? 'in' : '';
-    });
+    }, LOGIN_WAIT_MS);
     if (outcome === 'rejected') return false;
     report('Login', 'PASS');
     return true;
@@ -466,7 +473,7 @@
   }
 
   async function run(label) {
-    var stage = 'testing';
+    var stage = 'first login';
     unit = label;
     started = Date.now();
     scan.style.display = 'none';
@@ -479,6 +486,7 @@
         finish('RESET BY HAND', 'previous customer changed the login. Then scan again');
         return;
       }
+      stage = 'testing';
       if (!await checkIdentity(label)) {
         testing = OLP_FAIL;
         finish('FAIL', 'unit does not match the label, not reset');
@@ -508,9 +516,11 @@
     } catch (e) {
       report('Stopped', 'FAIL', e.message);
       logPage();
+      // No login means the tool never reached the unit, which says nothing about it
       if (stage === 'testing') testing = OLP_FAIL;
-      else wipe = { value: OLP_FAIL, detail: e.message };
-      var outcome = stage === 'reset' ? 'CHECK RESET BY HAND' :
+      else if (stage !== 'first login') wipe = { value: OLP_FAIL, detail: e.message };
+      var outcome = stage === 'first login' ? 'NOT TESTED' :
+        stage === 'reset' ? 'CHECK RESET BY HAND' :
         stage === 'second login' ? 'RESET DONE, RELOAD AND SCAN AGAIN' : 'FAIL';
       finish(outcome, e.message);
     }

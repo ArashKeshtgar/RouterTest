@@ -17,6 +17,7 @@ def fast(code):
         ("var POLL_MS = 3000", "var POLL_MS = 50"),
         ("var SETTLE_MS = 20000", "var SETTLE_MS = 0"),
         ("var CONNECT_MS = 120000", "var CONNECT_MS = 1000"),
+        ("var LOGIN_WAIT_MS = 90000", "var LOGIN_WAIT_MS = 1000"),
     ):
         code = code.replace(old, new)
     return code
@@ -318,6 +319,26 @@ def test_log_has_no_device_data(router):
     assert "RESULT: FAIL" in log
     for secret in (LABEL["P"], LABEL["KY"], LABEL["S"], LABEL["IMEI"], LABEL["IMEI"][-4:], "SERIAL"):
         assert secret not in log
+
+
+def test_unknown_login_page_is_not_a_failed_unit(router):
+    tab = router()
+    tab.evaluate(
+        "document.getElementById('app').innerHTML = "
+        "'<input id=\"other-user\" type=\"text\" value=\"secret-value\">'"
+    )
+    downloads = []
+    tab.on("download", lambda d: downloads.append(d))
+    assert " | NOT TESTED | " in run_demo(tab)
+    tab.wait_for_timeout(500)
+    log = next(d for d in downloads if d.suggested_filename.endswith(".txt"))
+    text = Path(log.path()).read_text(encoding="utf-8")
+    assert 'field: input id="other-user" type="text"' in text
+    assert "secret-value" not in text
+    record = next(d for d in downloads if d.suggested_filename.endswith(".json"))
+    values = json.loads(Path(record.path()).read_text(encoding="utf-8"))["Transactions"]
+    assert [v["FieldValue"] for v in values] == ["NOT-RUN", "NOT-RUN", "PENDING"]
+    assert tab.evaluate("[window.signIns, window.resets]") == [0, 0]
 
 
 def test_log_says_where_a_stuck_run_stopped(router):

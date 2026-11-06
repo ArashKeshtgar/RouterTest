@@ -69,6 +69,9 @@ Right-click each item -> Inspect -> note its `id` or a unique attribute:
 
 ## 4. Other
 - [ ] Label model field (N) of the Gateway 3.2; is 5G16-12W-A the Gateway 12?
+- [ ] Which model is the label N 5G31-03W-B? On the bench its login page was
+  `/login`, not the Gateway 12's `/web_whw/#/login`, and it has no
+  `#username-login-value`. That login page is not captured yet.
 - [ ] Does the 3.2's label have the same JSON QR?
 - [ ] Does the unit lock the login after failed attempts? After how many?
 - [ ] Does a freshly reset unit accept the label password, or force a new one?
