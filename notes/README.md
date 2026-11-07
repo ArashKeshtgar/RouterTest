@@ -79,6 +79,13 @@ Right-click each item -> Inspect -> note its `id` or a unique attribute:
   logged-out unit draws the sidenav and the map for a moment before going to its
   login page, and the demo took that for a login. The first tab was also already on
   the login page, and opening the same address did not reload it. v10 fixes both.
+- The operator says a unit always arrives logged out, so v11 always signs in with
+  the label. The only login it keeps is one it made itself, in that tab, on that
+  unit. It sends nothing to the router before a scan, writes every click it makes
+  to the log, and says in every log whether it pressed Factory reset.
+- [ ] The operator saw a unit restart about 10 s after the station opened, with no
+  scan and no click by the demo (v9 log, 2026-11-06). Is that the unit's own
+  start-up (carrier provisioning over the SIM), a cable, or something else?
 - [ ] Does the 3.2's label have the same JSON QR?
 - [ ] Does the unit lock the login after failed attempts? After how many?
 - [ ] Does a freshly reset unit accept the label password, or force a new one?

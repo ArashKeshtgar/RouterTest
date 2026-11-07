@@ -199,6 +199,8 @@ class Bench:
     def tell(self, name):
         if name == "loggedIn":
             self.state["loggedIn"] = True
+        elif name == "logout":
+            self.state["loggedIn"] = False
         elif name == "restart":
             self.down = 3
             self.state["loggedIn"] = False
@@ -285,15 +287,49 @@ def test_built_bookmarklet_runs(router):
     assert " | PASS | " in router().run(fast(code))
 
 
-def test_station_opens_in_its_own_tab_with_the_router_inside(router):
+def test_station_opens_in_its_own_tab_and_waits_for_a_scan(router):
     bench = router()
     station = bench.open_station()
     assert station.title() == "Router test station"
     station.wait_for_selector("#rt-link.up")
-    assert station.get_attribute("#rt-frame", "src") == bench.address + "/"
+    station.wait_for_timeout(500)
+    assert station.get_attribute("#rt-frame", "src") is None
+    assert bench.first.url == bench.address + "/web_whw/#/login"
+    bench.scan()
     station.wait_for_function(
         "document.getElementById('rt-frame').contentWindow.location.pathname === '/web_whw/'")
-    assert bench.first.url.startswith(bench.address)
+
+
+def test_nothing_touches_the_router_before_a_scan(router):
+    bench = router()
+    station = bench.open_station()
+    station.wait_for_selector("#rt-link.up")
+    bench.off = True
+    station.wait_for_selector("#rt-link.down")
+    bench.off = False
+    station.wait_for_selector("#rt-link.up")
+    station.wait_for_timeout(300)
+    text = station.inner_text("#rt-log")
+    assert "CLICK" not in text and "TRYING" not in text
+    assert "no test is running. Last click by the demo: none since this page opened" in text
+    assert bench.first.url == bench.address + "/web_whw/#/login"
+    assert bench.counts == {"signIns": 0, "resets": 0, "reboots": 0, "cancels": 0}
+
+
+def test_every_click_is_in_the_log_and_the_reset_is_named(router):
+    bench = router()
+    bench.run()
+    log = bench.log()
+    clicks = [line.split("CLICK: ")[1] for line in log.splitlines() if "CLICK: " in line]
+    assert clicks == ["Sign in", "the device on the Network map, to open its details",
+                      "Factory default > Reset", 'confirm button "Reset"', "Sign in"]
+    assert "FACTORY RESET: pressed by the demo at " in log
+
+
+def test_a_run_that_never_reaches_the_reset_says_so(router):
+    bench = router(serial="OTHER-SERIAL")
+    bench.run()
+    assert "FACTORY RESET: not pressed by the demo in this run" in bench.log()
 
 
 def test_opening_the_bookmark_again_keeps_the_same_station(router):
@@ -539,14 +575,53 @@ def test_logged_in_page_that_flashes_before_the_login_page_is_not_trusted(router
     assert bench.counts["signIns"] == 3
 
 
-def test_router_going_back_to_login_during_the_identity_check_fails_nothing(router):
+def test_router_going_back_to_login_during_the_identity_check_is_logged_in_again(router):
     bench = bench_router(router, flash=1500)
     bench.run(NO_FRAMES.replace("var SESSION_MS = 400", "var SESSION_MS = 50"))
     bench.state["loggedIn"] = False
+    signs = bench.counts["signIns"]
     result = bench.run()
-    assert " | NOT TESTED | The router went back to its login page." in result
+    assert " | PASS | " in result
+    assert "The router went back to its login page. Logging in again (2 of 3)" in bench.log()
+    assert bench.counts["signIns"] == signs + 1
     assert bench.counts["resets"] == 1
-    assert "STATIONS: DATA-WIPE NOT-RUN, TESTING NOT-RUN" in bench.log()
+
+
+def test_router_lost_during_the_tests_is_logged_in_again_and_finished(router):
+    bench = router()
+    bench.open_station()
+    bench.station.evaluate("""() => {
+      const frame = document.getElementById('rt-frame');
+      let done = false;
+      setInterval(() => {
+        const page = frame.contentWindow;
+        if (!done && page.location.hash === '#/wan/cellular-status' && page.document.querySelector('#imei-card')) {
+          done = true;
+          fetch('/tell/logout');
+          page.eval('loggedIn = false; route()');
+        }
+      }, 20);
+    }""")
+    result = bench.run()
+    assert " | PASS | " in result
+    assert "Logging in again (2 of 3)" in bench.log()
+    assert bench.counts["resets"] == 1
+
+
+def test_a_stop_during_the_tests_never_fails_the_unit(router):
+    bench = router()
+    bench.open_station(FAST.replace("var WAIT_MS = 30000", "var WAIT_MS = 1500"))
+    bench.station.evaluate("""() => {
+      const frame = document.getElementById('rt-frame');
+      setInterval(() => {
+        const page = frame.contentWindow;
+        if (page.location.hash === '#/wan/cellular-status') page.document.getElementById('app').innerHTML = '';
+      }, 20);
+    }""")
+    bench.scan()
+    result = bench.finished()
+    assert " | NOT TESTED | " in result
+    assert "TESTING NOT-RUN" in bench.log()
 
 
 def test_reset_page_clears_the_screen_and_leaves_the_router_alone(router):
@@ -575,10 +650,11 @@ def test_reset_page_is_off_while_a_test_runs(router):
     assert bench.station.is_enabled("#rt-clear")
 
 
-def test_already_logged_in_skips_sign_in(router):
+def test_a_login_the_demo_did_not_make_is_not_trusted(router):
     bench = router(loggedIn=True)
-    assert " | PASS | " in bench.run()
-    assert bench.counts["signIns"] == 1
+    result = bench.run()
+    assert " | NOT TESTED | The router answers, but the login box never appeared." in result
+    assert bench.counts["signIns"] == 0 and bench.counts["resets"] == 0
 
 
 @pytest.mark.parametrize(
@@ -652,7 +728,7 @@ def test_log_file_is_saved_with_every_step(router):
     name = bench.saved(".txt")[-1].suggested_filename
     log = bench.log()
     assert name.startswith("fastmile-demo-log-")
-    for step in ("TEST: Router ready", "clicked Sign in", "CHECK: IMEI PASS", "CHECK: Serial PASS", "RESULT: PASS"):
+    for step in ("TEST: Router ready", "CLICK: Sign in", "CHECK: IMEI PASS", "CHECK: Serial PASS", "RESULT: PASS"):
         assert step in log
 
 

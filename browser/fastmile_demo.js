@@ -12,11 +12,13 @@
 (function () {
   function main(win, origin) {
     var document = win.document;
-    var VERSION = 'fastmile demo v10';
+    var VERSION = 'fastmile demo v11';
     win.RT_VERSION = VERSION;
     // OLP's two results for every station are PASS and this
     var OLP_FAIL = 'FAIL-FAIL';
     var RESET_KEY = 'rt-demo-reset';
+    // A unit always arrives logged out, so only a login this demo made counts
+    var SIGNED_KEY = 'rt-demo-signed-in';
     var LOG_KEY = 'rt-demo-log';
     var STATS_KEY = 'rt-demo-stats';
     var PC_KEY = 'rt-demo-pc';
@@ -35,6 +37,8 @@
     // A logged-out router draws its logged-in page for a moment before it sends the
     // browser to the login page, so being logged in only counts if it lasts this long
     var SESSION_MS = 8000;
+    // A router that logs out or restarts during a run is logged in again this often
+    var TRIES = 3;
     var CONNECT_MS = 120000;
     var RECHECK_MS = 5000;
     var GREEN_MS = 120000;
@@ -162,6 +166,8 @@
     var addressIndex = 0;
     var greenSeen = false;
     var link = { up: null, status: 0, since: Date.now(), checked: 0, drops: 0 };
+    var lastClick = '';
+    var resetPressedAt = '';
 
     function pad(number) {
       return String(number).padStart(2, '0');
@@ -324,6 +330,38 @@
       return stop;
     }
 
+    // The router lost the login or the connection: the run logs in again
+    function remember(key, value) {
+      try {
+        if (value) win.sessionStorage.setItem(key, value);
+        else win.sessionStorage.removeItem(key);
+      } catch (e) {
+        return;
+      }
+    }
+
+    function signedInHere() {
+      try {
+        return !!unit && win.sessionStorage.getItem(SIGNED_KEY) === lastFour(unit.S);
+      } catch (e) {
+        return false;
+      }
+    }
+
+    function lostRouter(why) {
+      remember(SIGNED_KEY, '');
+      var stop = giveUp(why, 'Scan again when the router is up.');
+      stop.retry = true;
+      return stop;
+    }
+
+    // The only way the demo clicks on the router, so the log holds every click
+    function press(el, what) {
+      lastClick = clock(new Date(), ':') + ' ' + what;
+      log('CLICK', what);
+      el.click();
+    }
+
     function sleep(ms) {
       return new Promise(function (done) { setTimeout(done, ms); });
     }
@@ -461,17 +499,26 @@
       while (Date.now() < end) {
         var value = read();
         if (value) return value;
+        checkRouter();
         await wait(200);
       }
       throw new Error('timed out waiting for ' + what);
     }
 
     // A freshly reset unit needs time to connect, so give a bad value time to change
+    // A reading from a logged-out or restarting router is not a reading of the unit
+    function checkRouter() {
+      if (link.up === false) throw lostRouter('The router stopped answering.');
+      if (busy && unit && loginBoxes() && currentStep !== 'link') throw lostRouter('The router went back to its login page.');
+    }
+
     async function settled(read, good) {
       var end = Date.now() + CONNECT_MS;
+      checkRouter();
       var value = read();
       while (!good(value) && Date.now() < end) {
         await wait(1000);
+        checkRouter();
         value = read();
       }
       return value;
@@ -482,10 +529,12 @@
     async function readTwice(read, good) {
       var first = await settled(read, good);
       await wait(RECHECK_MS);
+      checkRouter();
       var second = read();
       if (first === second) return { value: first, stable: true };
       log('SAW', 'two different readings, reading a third time');
       await wait(RECHECK_MS);
+      checkRouter();
       var third = read();
       return { value: third, stable: third === second };
     }
@@ -601,11 +650,11 @@
           log('SAW', isUp ? 'router started answering, HTTP ' + status : 'router stopped answering');
           link.since = Date.now();
           if (!isUp) link.drops++;
-          // A unit was swapped or came back, so the page in the view is stale
-          if (isUp && link.up === false && !busy) {
-            openRouter();
-            setCard('', 'READY', 'Router connected.', 'Scan the QR label.');
+          // Nothing touches the router before a scan, so a drop here is not the demo's
+          if (!isUp && !busy && link.up) {
+            log('SAW', 'no test is running. Last click by the demo: ' + (lastClick || 'none since this page opened'));
           }
+          if (isUp && link.up === false && !busy) setCard('', 'READY', 'Router connected.', 'Scan the QR label.');
           if (!isUp && !busy) setCard('', 'READY', 'No router is answering.', 'Connect the next unit and wait.');
         }
         link.up = isUp;
@@ -639,7 +688,10 @@
     }
 
     // Waits for the router, however long it takes it to come up, and says what it sees
-    async function waitForRouter(afterReset) {
+    // The operator always types the label's login on a unit, so the demo does too.
+    // Only a login this demo made in this tab on this unit, still there, is kept
+    async function waitForRouter() {
+      var keep = signedInHere();
       var end = Date.now() + READY_MS;
       var opened = Date.now();
       var inSince = 0;
@@ -652,9 +704,9 @@
           log('SAW', 'login box found after ' + Math.round((Date.now() - stepStarted) / 1000) + 's, page ' + routerPage());
           return boxes;
         }
-        inSince = !afterReset && find('div.sidenav-logout') ? inSince || Date.now() : 0;
+        inSince = keep && find('div.sidenav-logout') ? inSince || Date.now() : 0;
         if (inSince && Date.now() - inSince >= SESSION_MS) {
-          log('SAW', 'already logged in');
+          log('SAW', 'still logged in from the login this demo made');
           return null;
         }
         var waited = Math.round((Date.now() - stepStarted) / 1000);
@@ -674,11 +726,11 @@
 
     // Returns false when the unit refused the label, which is not a failed unit
     async function logIn(label, afterReset) {
-      var boxes = await waitForRouter(afterReset);
+      var boxes = await waitForRouter();
       setStep('link', 'done');
       if (!boxes) {
-        begin(afterReset ? 'login2' : 'login', 'Already logged in.');
-        report('Login', 'INFO', 'already logged in');
+        begin(afterReset ? 'login2' : 'login', 'Still logged in from the login this demo made.');
+        report('Login', 'INFO', 'still logged in from this demo');
         return true;
       }
       begin(afterReset ? 'login2' : 'login', 'Typing the username and password from the label.');
@@ -686,13 +738,13 @@
       type(boxes.pass, String(label.P));
       log('TRYING', 'filled username and password');
       var button = await waitFor('the Sign in button', signInButton);
-      button.click();
-      log('TRYING', 'clicked Sign in');
+      press(button, 'Sign in');
       var outcome = await waitFor('the login to finish', function () {
         if (rejected()) return 'rejected';
         return find('div[role="button"].mapClickArea') ? 'in' : '';
       }, LOGIN_WAIT_MS);
       if (outcome === 'rejected') return false;
+      remember(SIGNED_KEY, lastFour(label.S));
       report('Login', 'PASS');
       return true;
     }
@@ -707,7 +759,7 @@
       if (!find('#factorydefaultbtn button')) {
         log('TRYING', 'opening device details');
         await goTo('#/overview');
-        (await waitForMap()).click();
+        press(await waitForMap(), 'the device on the Network map, to open its details');
       }
     }
 
@@ -729,7 +781,6 @@
     async function checkIdentity(label) {
       await openDetails();
       await waitFor("the serial number on the router's page", function () {
-        if (loginBoxes()) throw giveUp('The router went back to its login page.', 'Scan again.');
         return valueOf('Serial number');
       });
       var name = await readTwice(function () { return valueOf('Device name'); }, present);
@@ -829,7 +880,9 @@
       log('TRYING', 'clicking Factory default > Reset');
       // The page can die with the unit, so keep what is known so far
       saveLog();
-      reset.click();
+      resetPressedAt = clock(new Date(), ':');
+      remember(SIGNED_KEY, '');
+      press(reset, 'Factory default > Reset');
       var confirm;
       try {
         confirm = await waitFor('the reset confirm button', function () { return confirmButton(before); });
@@ -841,7 +894,7 @@
       log('SAW', 'buttons after Reset: ' + newButtons(before).map(text).join(', '));
       log('TRYING', 'confirming with button "' + text(confirm) + '"');
       var drops = link.drops;
-      confirm.click();
+      press(confirm, 'confirm button "' + text(confirm) + '"');
       report('Factory reset', 'PASS', 'confirmed');
       begin('restart', 'Waiting for the router to go down and come back.');
       await waitForRouterEvent(function () { return link.drops > drops; }, RESTART_START_MS,
@@ -920,6 +973,7 @@
       if (why) log('WHY', why);
       if (next) log('DO NEXT', next);
       log('STATIONS', 'DATA-WIPE ' + wipe.value + ', TESTING ' + testing + ', REFURB ' + visual);
+      log('FACTORY RESET', resetPressedAt ? 'pressed by the demo at ' + resetPressedAt : 'not pressed by the demo in this run');
       saveLog();
       saveResult();
       var runs = todayRuns().concat([{ result: overall, seconds: seconds, fail: firstFail() }]);
@@ -938,6 +992,7 @@
 
     function clearRun() {
       checks = [];
+      resetPressedAt = '';
       wipe = { value: 'NOT-RUN', detail: '' };
       testing = 'NOT-RUN';
       visual = 'PENDING';
@@ -967,8 +1022,39 @@
       byId('rt-unit').textContent = '';
       setCard('', 'READY', 'Waiting for a scan.', '');
       addressIndex = 0;
-      openRouter();
       scan.focus();
+    }
+
+    // Login and identity, logging in again if the router loses the login or restarts.
+    // Returns 'rejected', 'mismatch' or 'same'
+    async function logInAndIdentify(label) {
+      for (var attempt = 1; ; attempt++) {
+        try {
+          begin('link', 'Checking that the router answers.');
+          if (!await logIn(label)) return 'rejected';
+          begin('identity', 'Comparing the unit with the label before the reset.');
+          return await checkIdentity(label) ? 'same' : 'mismatch';
+        } catch (e) {
+          if (!e.retry || attempt >= TRIES) throw e;
+          log('TRYING', e.message + ' Logging in again (' + (attempt + 1) + ' of ' + TRIES + ')');
+        }
+      }
+    }
+
+    async function testAfterLogin(label, afterReset) {
+      for (var attempt = 1; ; attempt++) {
+        try {
+          if (attempt > 1) {
+            begin('link', 'Waiting for the router to log in again.');
+            if (!await logIn(label, afterReset)) throw giveUp('The label was rejected on a new login.', 'Check the unit by hand.');
+          }
+          await waitForGreen();
+          return await checkUnit(label);
+        } catch (e) {
+          if (!e.retry || attempt >= TRIES) throw e;
+          log('TRYING', e.message + ' Logging in again (' + (attempt + 1) + ' of ' + TRIES + ')');
+        }
+      }
     }
 
     async function run(label) {
@@ -990,8 +1076,8 @@
         return;
       }
       try {
-        begin('link', 'Checking that the router answers.');
-        if (!await logIn(label)) {
+        var identity = await logInAndIdentify(label);
+        if (identity === 'rejected') {
           report('Login', 'FAIL', 'label rejected');
           rememberReset(label);
           wipe.detail = 'Operator to reset by hand';
@@ -999,8 +1085,7 @@
             'Reset the unit by hand, then scan again.');
           return;
         }
-        begin('identity', 'Comparing the unit with the label before the reset.');
-        if (!await checkIdentity(label)) {
+        if (identity === 'mismatch') {
           testing = OLP_FAIL;
           finish('FAIL', 'The unit does not match the label. It was not reset.', 'Check that this QR belongs to this unit.');
           return;
@@ -1027,21 +1112,20 @@
           wipe = { value: 'PASS', detail: 'Reset, then logged in with the label' };
           stage = 'testing';
         }
-        await waitForGreen();
-        var passed = await checkUnit(label);
+        var passed = await testAfterLogin(label, true);
         testing = passed ? 'PASS' : OLP_FAIL;
         finish(passed ? 'PASS' : 'FAIL', passed ? '' : firstFail() + ' did not pass.', passed ? '' : 'Check that part of the unit.');
       } catch (e) {
         log('SAW', 'stopped during ' + stage + ': ' + e.message);
         logPage();
-        // Until the unit has been read, a stop says nothing about the unit
-        if (stage === 'testing') testing = OLP_FAIL;
-        else if (stage !== 'first login') wipe = { value: OLP_FAIL, detail: e.message };
+        // A stop is the demo not finishing, which says nothing about the unit, so the
+        // unit is never failed for it
+        if (stage === 'reset' || stage === 'second login') wipe = { value: OLP_FAIL, detail: e.message };
         var next = e.next || { 'first login': 'Read the log below, then scan again.',
           reset: 'Check the unit and reset it by hand if needed.',
           'second login': 'The reset was done. Scan again when the router is up.',
-          testing: 'Read the log below.' }[stage];
-        finish(stage === 'testing' ? 'FAIL' : 'NOT TESTED', e.message, next);
+          testing: 'Scan again to finish the tests.' }[stage];
+        finish('NOT TESTED', e.message, next);
       }
     }
 
@@ -1088,8 +1172,8 @@
 
     recoverOldLog();
     logStation();
+    log('SAW', 'nothing is sent to the router until a QR is scanned');
     showStats();
-    openRouter();
     watchLink();
     setInterval(tickClock, 1000);
     scan.focus();
