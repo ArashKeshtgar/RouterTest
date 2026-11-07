@@ -1,7 +1,8 @@
 """The FastMile test station, run on a copy of the real page's structure. The login,
 overview, details and cellular pages follow the Gateway 12 captures v1 to v5.
 The router's own address redirects to its login page, as the operator sees it.
-The reset confirm dialog and the restart timing are still guesses."""
+The reset confirm dialog and the restart timing are still guesses. The demo never
+presses Reset: a stand-in operator presses it on the router page when asked."""
 
 import importlib.util
 import json
@@ -14,6 +15,8 @@ from urllib.parse import unquote
 import pytest
 from playwright.sync_api import sync_playwright
 
+CHROME_BLOCKED_PORTS = {1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566,
+                        6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080}
 LABEL = json.loads(Path("samples/fake_label.json").read_text(encoding="utf-8"))
 SOURCE = Path("browser/fastmile_demo.js").read_text(encoding="utf-8")
 
@@ -29,6 +32,7 @@ def fast(code):
         ("var SESSION_MS = 8000", "var SESSION_MS = 400"),
         ("var CONNECT_MS = 120000", "var CONNECT_MS = 1000"),
         ("var LOGIN_WAIT_MS = 90000", "var LOGIN_WAIT_MS = 1000"),
+        ("var RESET_ASK_MS = 600000", "var RESET_ASK_MS = 5000"),
     ):
         code = code.replace(old, new)
     return code
@@ -137,6 +141,25 @@ route();
 </script>"""
 
 OTHER_ROUTER_PAGE = "<title>Router</title><p>Please wait</p>"
+
+# The operator: when the station asks, presses Factory default > Reset on the router page
+# and confirms, once per ask
+OPERATOR = """() => {
+  let done = '';
+  setInterval(() => {
+    const box = document.getElementById('rt-ask');
+    if (!box || !box.dataset.ask || box.dataset.ask === done) return;
+    const frame = document.getElementById('rt-frame');
+    const view = frame.style.display === 'none' ? window.opener : frame.contentWindow;
+    const reset = view.document.querySelector('#factorydefaultbtn button');
+    if (!reset) return;
+    done = box.dataset.ask;
+    reset.click();
+    setTimeout(() => view.document.getElementById('yes').click(), 500);
+  }, 50);
+}"""
+SETUP_PAGE = ("<title>x</title><p>Set a new password for " + LABEL["ID"] + " 12345</p>"
+              '<input id="new-pass" type="password"><button>Save</button>')
 UNREADY_PAGE = '<title>x</title><p>Starting up 12345</p><input id="other-user" value="secret-value">'
 
 
@@ -190,6 +213,10 @@ class Bench:
                 bench.answer(self)
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Router)
+        # Chrome refuses some ports outright, so a random one can land on them
+        while self.server.server_address[1] in CHROME_BLOCKED_PORTS:
+            self.server.server_close()
+            self.server = ThreadingHTTPServer(("127.0.0.1", 0), Router)
         self.server.daemon_threads = True
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.address = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -204,6 +231,8 @@ class Bench:
         elif name == "restart":
             self.down = 3
             self.state["loggedIn"] = False
+        elif name == "setup":
+            self.page_html = SETUP_PAGE
         else:
             self.counts[name] += 1
 
@@ -234,12 +263,14 @@ class Bench:
         request.end_headers()
         request.wfile.write(body)
 
-    def open_station(self, code=FAST):
+    def open_station(self, code=FAST, operator=True):
         with self.context.expect_page() as opened:
             self.first.evaluate(code)
         self.station = opened.value
         self.station.on("download", lambda d: self.downloads.append(d))
         self.station.wait_for_selector("#rt-scan")
+        if operator:
+            self.station.evaluate(OPERATOR)
         return self.station
 
     def scan(self, label=LABEL):
@@ -249,9 +280,9 @@ class Bench:
         self.station.wait_for_selector("#rt-result", state="visible", timeout=20000)
         return self.station.input_value("#rt-result")
 
-    def run(self, code=FAST):
+    def run(self, code=FAST, operator=True):
         if not self.station:
-            self.open_station(code)
+            self.open_station(code, operator)
         self.scan()
         self.station.wait_for_selector("#rt-result", state="hidden", timeout=5000)
         return self.finished()
@@ -320,16 +351,18 @@ def test_every_click_is_in_the_log_and_the_reset_is_named(router):
     bench = router()
     bench.run()
     log = bench.log()
-    clicks = [line.split("CLICK: ")[1] for line in log.splitlines() if "CLICK: " in line]
-    assert clicks == ["Sign in", "the device on the Network map, to open its details",
-                      "Factory default > Reset", 'confirm button "Reset"', "Sign in"]
-    assert "FACTORY RESET: pressed by the demo at " in log
+    clicks = [line.split("] CLICK: ")[1] for line in log.splitlines() if "] CLICK: " in line]
+    assert clicks == ["Sign in", "the device on the Network map, to open its details", "Sign in"]
+    assert "FACTORY RESET: pressed by the operator at " in log
+    assert "FACTORY RESET: the demo never presses Reset" in log
+    assert 'OPERATOR CLICK: button "Reset"' in log
+    assert 'OPERATOR CLICK: button id=yes "Reset"' in log
 
 
 def test_a_run_that_never_reaches_the_reset_says_so(router):
     bench = router(serial="OTHER-SERIAL")
     bench.run()
-    assert "FACTORY RESET: not pressed by the demo in this run" in bench.log()
+    assert "FACTORY RESET: not pressed in this run" in bench.log()
 
 
 def test_opening_the_bookmark_again_keeps_the_same_station(router):
@@ -358,6 +391,7 @@ def test_blocked_pop_up_takes_over_the_tab(router):
     bench.first.evaluate("window.open = () => null")
     bench.first.evaluate(FAST)
     bench.first.wait_for_selector("#rt-scan")
+    bench.first.evaluate(OPERATOR)
     bench.station = bench.first
     bench.first.on("download", lambda d: bench.downloads.append(d))
     assert " | PASS | " in bench.run()
@@ -382,7 +416,9 @@ def test_router_address_that_leads_nowhere_falls_back_to_the_known_login(router)
 def test_buttons_of_the_reset_dialog_are_written_down(router):
     bench = router()
     bench.run()
-    assert "buttons after Reset: Cancel, Reset" in bench.log()
+    log = bench.log()
+    assert "new buttons on the router page: Cancel, Reset" in log
+    assert "around them: Cancel | Reset" in log
 
 
 def test_order_is_identity_then_reset_then_functional(router):
@@ -533,12 +569,95 @@ def test_hand_reset_unit_is_not_reset_again(router):
     assert bench.counts["resets"] == 0
 
 
-def test_unknown_confirm_button_is_not_guessed(router):
-    bench = router(confirm="Erase everything")
-    result = bench.run(FAST.replace("var WAIT_MS = 30000", "var WAIT_MS = 1000"))
+def test_demo_never_presses_reset_and_waits_for_the_operator(router):
+    bench = router()
+    result = bench.run(FAST.replace("var RESET_ASK_MS = 5000", "var RESET_ASK_MS = 800"), operator=False)
+    assert " | NOT TESTED | No reset was seen" in result
+    assert [bench.counts[k] for k in ("resets", "cancels", "reboots")] == [0, 0, 0]
+    log = bench.log()
+    assert "FACTORY RESET: not pressed in this run" in log
+    assert "asking the operator to press Factory default > Reset" in log
+    assert [t["FieldValue"] for t in json.loads(Path(bench.saved(".json")[-1].path()).read_text())["Transactions"]] == [
+        "NOT-RUN", "NOT-RUN", "PENDING"]
+
+
+def test_station_asks_the_operator_with_the_unit_matching(router):
+    bench = router()
+    bench.open_station(operator=False)
+    bench.scan()
+    bench.station.wait_for_selector("#rt-ask", state="visible", timeout=10000)
+    assert bench.station.inner_text("#rt-big") == "YOUR TURN"
+    assert "Factory default > Reset" in bench.station.inner_text("#rt-ask")
+    assert bench.counts["resets"] == 0
+    bench.station.click("#rt-stop")
+    bench.finished()
+    assert not bench.station.is_visible("#rt-ask")
+
+
+def test_skip_reset_runs_the_tests_without_a_reset(router):
+    bench = router()
+    bench.open_station(operator=False)
+    bench.scan()
+    bench.station.click("#rt-skip", timeout=10000)
+    result = bench.finished()
+    assert " | PASS | " in result and "Factory reset INFO" in result
+    assert bench.counts["resets"] == 0 and bench.counts["signIns"] == 1
+    assert "FACTORY RESET: skipped by the operator" in bench.log()
+    assert [t["FieldValue"] for t in json.loads(Path(bench.saved(".json")[-1].path()).read_text())["Transactions"]] == [
+        "NOT-RUN", "PASS", "PENDING"]
+
+
+def test_restart_without_a_reset_click_is_not_counted_as_a_wipe(router):
+    bench = router()
+    bench.open_station(operator=False)
+    bench.station.evaluate("""() => {
+      let done = false;
+      setInterval(() => {
+        const box = document.getElementById('rt-ask');
+        if (!done && box.dataset.ask) { done = true; fetch('/tell/restart'); }
+      }, 50);
+    }""")
+    bench.scan()
+    result = bench.finished()
+    assert " | PASS | " in result
+    log = bench.log()
+    assert "no click on Reset was seen" in log
+    assert "LINK: 1 drop(s) during this run, longest " in log
+    assert [t["FieldValue"] for t in json.loads(Path(bench.saved(".json")[-1].path()).read_text())["Transactions"]] == [
+        "NOT-RUN", "PASS", "PENDING"]
+
+
+def test_drops_say_how_long_and_during_which_step(router):
+    bench = router()
+    bench.run()
+    log = bench.log()
+    assert 'router stopped answering (drop 1 since this page opened, during step "Factory reset (you press it)")' in log
+    assert "without an answer" in log
+
+
+def test_unknown_page_after_the_reset_is_written_down_masked(router):
+    bench = router()
+    bench.open_station(FAST.replace("var REOPEN_MS = 500", "var REOPEN_MS = 300"), operator=False)
+    bench.station.evaluate("""() => {
+      let done = false;
+      setInterval(() => {
+        const box = document.getElementById('rt-ask');
+        if (done || !box.dataset.ask) return;
+        done = true;
+        const view = document.getElementById('rt-frame').contentWindow.document;
+        fetch('/tell/setup').then(() => {
+          view.querySelector('#factorydefaultbtn button').click();
+          setTimeout(() => view.getElementById('yes').click(), 100);
+        });
+      }, 50);
+    }""")
+    bench.scan()
+    result = bench.finished()
     assert " | NOT TESTED | " in result
-    assert "no known confirm button" in result
-    assert [bench.counts[k] for k in ("resets", "cancels")] == [0, 0]
+    log = bench.log()
+    assert "page text: Set a new password for" in log
+    assert "buttons: Save" in log
+    assert LABEL["ID"] not in log
 
 
 def test_changed_password_tells_operator_to_reset_and_tries_once(router):
@@ -736,7 +855,7 @@ def test_log_is_saved_before_the_reset_button_is_pressed(router):
     bench = router()
     bench.run()
     first = Path(bench.saved(".txt")[0].path()).read_text(encoding="utf-8")
-    assert "clicking Factory default > Reset" in first
+    assert "asking the operator to press Factory default > Reset" in first
     assert "RESULT" not in first
 
 

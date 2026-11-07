@@ -1,18 +1,19 @@
 // FastMile demo: opens the test station in its own Chrome tab, with the router's page
 // inside it. Scan the label and it waits for the router, logs in with the label, checks
-// the unit is the one on the label, factory resets it, logs in again, waits for the
-// green light and runs the functional tests, reading every result twice. It asks the
-// router for a page every few seconds and shows the answer all the time. It sends
-// nothing anywhere. It clicks only Sign in, the device on the Network map and Factory
-// default > Reset, which also reboots the unit. It tries each login once and changes
-// no setting. The log says what was tried, what was seen and why a test did not run,
+// the unit is the one on the label, then asks the operator to press Factory default >
+// Reset on the router and watches: the buttons that appear, what the operator clicks
+// and the restart. Then it logs in again, waits for the green light and runs the
+// functional tests, reading every result twice. It asks the router for a page every
+// few seconds, shows the answer all the time and logs every drop and how long it
+// lasted. It sends nothing anywhere. It clicks only Sign in and the device on the
+// Network map: it never presses Reset. It tries each login once and changes no setting. The log says what was tried, what was seen and why a test did not run,
 // with no device data, and is kept in the browser as it grows, so a closed tab loses
 // nothing. A .json result in the shape of the three OLP stations holds the IMEI that
 // OLP files units under, so it must not be uploaded. Nothing is sent to OLP.
 (function () {
   function main(win, origin) {
     var document = win.document;
-    var VERSION = 'fastmile demo v11';
+    var VERSION = 'fastmile demo v12';
     win.RT_VERSION = VERSION;
     // OLP's two results for every station are PASS and this
     var OLP_FAIL = 'FAIL-FAIL';
@@ -44,16 +45,15 @@
     var GREEN_MS = 120000;
     var WAIT_MS = 30000;
     var LOGIN_WAIT_MS = 90000;
-    var RESTART_START_MS = 60000;
     var RESTART_END_MS = 300000;
-    // The confirm dialog has not been captured yet, so its button is matched by word
-    var CONFIRM_WORDS = ['reset', 'factory reset', 'confirm', 'ok', 'okay', 'yes', 'continue', 'proceed'];
+    // How long the operator has to press Reset on the router
+    var RESET_ASK_MS = 600000;
     var STEPS = [
       ['label', 'Label scanned', 'Reads the model, serial and IMEI from the QR.'],
       ['link', 'Router ready', 'Waits until the router answers and its login page is up.'],
       ['login', 'Logged in with the label', 'Signs in with the username and password on the label.'],
       ['identity', 'Model, serial and MAC match the label', 'Compares the unit with the label before anything is erased.'],
-      ['reset', 'Factory reset', 'Erases the unit. This cannot be undone.'],
+      ['reset', 'Factory reset (you press it)', 'You press Reset on the router. The demo watches and writes down what it sees.'],
       ['restart', 'Router restarted', 'Waits for the router to go down and come back.'],
       ['login2', 'Logged in again', 'A login that works here shows the reset really happened.'],
       ['green', 'Green light', 'Waits for 5G, then you confirm the green light.'],
@@ -88,7 +88,10 @@
       '.steps .running{background:var(--busybg);margin:0 -12px;padding:8px 12px}.steps .running .icon{color:var(--busy)}' +
       '#rt-card{border-radius:8px;padding:16px;text-align:center;background:var(--soft)}' +
       '#rt-card.PASS{background:var(--goodbg);color:var(--good)}#rt-card.FAIL{background:var(--badbg);color:var(--bad)}' +
-      '#rt-card.NOTTESTED{background:var(--warnbg);color:var(--warn)}#rt-card.BUSY{background:var(--busybg);color:var(--busy)}' +
+      '#rt-card.NOTTESTED,#rt-card.ASK{background:var(--warnbg);color:var(--warn)}#rt-card.BUSY{background:var(--busybg);color:var(--busy)}' +
+      '#rt-ask{display:none;flex-direction:column;gap:8px;padding:12px;border:2px solid var(--warn);border-radius:8px}' +
+      '#rt-ask ol{margin:0;padding-left:20px;line-height:1.6}#rt-skip{align-self:flex-end}' +
+      '.view.big{height:620px}.view.big #rt-frame{transform:scale(.68)}' +
       '#rt-big{font-size:34px;font-weight:bold;line-height:1.2}#rt-why,#rt-next{margin-top:6px}#rt-next{font-weight:bold}' +
       '.side{display:flex;flex-direction:column;gap:12px;min-width:0}#rt-green{display:none;font-size:18px;' +
       'font-weight:bold;padding:14px;background:var(--good);color:#fff;border:0}' +
@@ -113,6 +116,9 @@
       '<div class="main"><ol class="steps" id="rt-steps"></ol><div class="side">' +
       '<div id="rt-card"><div id="rt-big">READY</div><div id="rt-why">Waiting for a scan.</div><div id="rt-next"></div></div>' +
       '<button id="rt-green">The light is green</button>' +
+      '<div id="rt-ask"><b>Your turn: reset the unit</b><ol><li id="rt-ask-where"></li>' +
+      '<li>Press <b>Factory default &gt; Reset</b>, then confirm.</li><li>Come back here. The demo carries on by itself.</li></ol>' +
+      '<button id="rt-skip" title="Runs the tests without a reset">Skip reset, test only</button></div>' +
       '<div class="tiles"><div class="tile"><small>Tested today</small><b id="rt-count">0</b></div>' +
       '<div class="tile"><small>Pass rate</small><b id="rt-rate">–</b></div>' +
       '<div class="tile"><small>Avg per unit</small><b id="rt-average">–</b></div>' +
@@ -167,7 +173,12 @@
     var greenSeen = false;
     var link = { up: null, status: 0, since: Date.now(), checked: 0, drops: 0 };
     var lastClick = '';
-    var resetPressedAt = '';
+    // '', 'asking', 'skip', 'pressed', 'no click', 'skipped'
+    var resetState = '';
+    var resetClickAt = '';
+    var watching = false;
+    var runDrops = 0;
+    var runLongest = 0;
 
     function pad(number) {
       return String(number).padStart(2, '0');
@@ -296,12 +307,16 @@
       }
     }
 
+    function stepTitle(key) {
+      return STEPS.filter(function (step) { return step[0] === key; })[0][1];
+    }
+
     function begin(key, what) {
       if (currentStep && stepRows[currentStep].className === 'running') setStep(currentStep, 'done');
       currentStep = key;
       stepStarted = Date.now();
       setStep(key, 'running', what);
-      var title = STEPS.filter(function (step) { return step[0] === key; })[0][1];
+      var title = stepTitle(key);
       log('TEST', title);
       setCard('BUSY', 'TESTING', title, what);
     }
@@ -589,14 +604,36 @@
       return String(value).toUpperCase().replace(/[^0-9A-F]/g, '');
     }
 
-    // Only for a page before login, and anything that could be device data is hidden
+    // Label values are hidden whole, so a Wi-Fi name of several words goes too, then
+    // every word with a digit (serials, MACs, IMEIs, addresses)
+    function maskText(value) {
+      var out = String(value || '');
+      (unit ? [unit.ID, unit.KY, unit.U, unit.P, unit.S, unit['23S'], unit.IMEI] : []).forEach(function (secret) {
+        if (secret && String(secret).length >= 3) out = out.split(String(secret)).join('***');
+      });
+      return out.replace(/\s+/g, ' ').trim().split(' ').map(function (word) {
+        return /\d/.test(word) ? '***' : word;
+      }).join(' ').slice(0, 300);
+    }
+
+    // Only for a page that is not logged in, and anything that could be device data is hidden
     function maskedPageText() {
       if (find('div.sidenav-logout')) return '(logged in, page text not logged)';
-      var secrets = unit ? [unit.ID, unit.KY, unit.U, unit.P, unit.S, unit['23S'], unit.IMEI] : [];
-      return leaves().map(text).join(' | ').split(' ').map(function (word) {
-        var secret = secrets.some(function (value) { return value && word.indexOf(String(value)) >= 0; });
-        return secret || /\d/.test(word) ? '***' : word;
-      }).join(' ').slice(0, 300);
+      return maskText(leaves().map(text).join(' | '));
+    }
+
+    function buttonNames(list) {
+      return list.map(function (el) { return maskText(text(el)).slice(0, 40) || '(no text)'; }).join(', ');
+    }
+
+    // An unknown page after the reset (new password, first setup) is written down once
+    var lastUnknown = '';
+    function logUnknownPage() {
+      var seen = routerPage() + ' ' + maskedPageText();
+      if (seen === lastUnknown) return;
+      lastUnknown = seen;
+      log('SAW', 'page text: ' + (maskedPageText() || '(empty)'));
+      if (!find('div.sidenav-logout')) log('SAW', 'buttons: ' + (buttonNames(visibleButtons()) || 'none'));
     }
 
     // Page facts for a stop, without any of the page's values
@@ -604,6 +641,7 @@
       log('SAW', 'router ' + (link.up ? 'answering, HTTP ' + link.status : 'not answering') +
         ', page ' + routerPage());
       log('SAW', 'page text: ' + (maskedPageText() || '(empty)'));
+      if (!find('div.sidenav-logout')) log('SAW', 'buttons: ' + (buttonNames(visibleButtons()) || 'none'));
       ['IMEI', 'Status', 'Serial number', 'MAC address', 'Device name', 'WiFi 2.4 GHz', '5G+ Signal'].forEach(function (label) {
         var seen = leaves().some(function (el) { return text(el) === label; });
         if (seen) log('SAW', 'label "' + label + '": ' + (valueOf(label) ? 'has a value' : 'no value found'));
@@ -647,9 +685,20 @@
         var isUp = status > 0;
         link.checked = Date.now();
         if (isUp !== link.up) {
-          log('SAW', isUp ? 'router started answering, HTTP ' + status : 'router stopped answering');
+          var gone = Math.round((Date.now() - link.since) / 1000);
+          if (isUp) {
+            log('SAW', 'router started answering, HTTP ' + status +
+              (link.up === false ? ' after ' + gone + 's without an answer' : ''));
+            if (link.up === false && busy) runLongest = Math.max(runLongest, gone);
+          } else {
+            log('SAW', 'router stopped answering (drop ' + (link.drops + 1) + ' since this page opened' +
+              (busy && currentStep ? ', during step "' + stepTitle(currentStep) + '"' : '') + ')');
+          }
           link.since = Date.now();
-          if (!isUp) link.drops++;
+          if (!isUp) {
+            link.drops++;
+            if (busy) runDrops++;
+          }
           // Nothing touches the router before a scan, so a drop here is not the demo's
           if (!isUp && !busy && link.up) {
             log('SAW', 'no test is running. Last click by the demo: ' + (lastClick || 'none since this page opened'));
@@ -714,6 +763,7 @@
           'No answer yet, trying every few seconds (' + waited + 's)');
         if (link.up && Date.now() - opened > REOPEN_MS) {
           log('SAW', 'no login box on page ' + routerPage());
+          logUnknownPage();
           opened = Date.now();
           openRouter();
         }
@@ -860,52 +910,132 @@
       });
     }
 
-    function confirmButton(before) {
-      var fresh = newButtons(before);
-      for (var i = 0; i < CONFIRM_WORDS.length; i++) {
-        for (var j = 0; j < fresh.length; j++) {
-          if (text(fresh[j]).toLowerCase() === CONFIRM_WORDS[i]) return fresh[j];
-        }
-      }
-      return null;
+    // The nearest box that looks like a dialog, or else the smallest box holding all the
+    // new buttons
+    function dialogOf(buttons) {
+      var box = up(buttons[0], function (e) {
+        return e.getAttribute('role') === 'dialog' || /DIALOG|MODAL/.test(e.tagName) ||
+          /dialog|modal|popup|overlay/i.test(typeof e.className === 'string' ? e.className : '');
+      });
+      if (box) return box;
+      box = buttons[0].parentElement || buttons[0];
+      while (box.parentElement && !buttons.every(function (el) { return box.contains(el); })) box = box.parentElement;
+      return box;
     }
 
-    async function factoryReset() {
-      begin('reset', 'Pressing Factory default > Reset.');
+    // What the operator clicks on the router page while the demo waits for the reset.
+    // Button names only, never what a field holds
+    function watchClicks() {
+      var doc = routerDocument();
+      if (!doc || doc.rtWatched) return;
+      doc.rtWatched = true;
+      doc.addEventListener('click', function (event) {
+        if (!watching) return;
+        var path = (event.composedPath ? event.composedPath() : [event.target]).filter(function (el) {
+          return el && el.nodeType === 1;
+        });
+        var el = path.filter(function (e) {
+          return e.tagName === 'BUTTON' || e.getAttribute('role') === 'button';
+        })[0] || path[0];
+        if (!el) return;
+        log('OPERATOR CLICK', el.tagName.toLowerCase() + (el.id ? ' id=' + el.id : '') + ' "' +
+          (maskText(text(el)).slice(0, 40) || '(no text)') + '"');
+        if (isMainResetButton(el) && !resetClickAt) resetClickAt = clock(new Date(), ':');
+      }, true);
+    }
+
+    function beep() {
+      try {
+        var sound = new (win.AudioContext || win.webkitAudioContext)();
+        var tone = sound.createOscillator();
+        tone.connect(sound.destination);
+        tone.start();
+        tone.stop(sound.currentTime + 0.3);
+      } catch (e) {
+        return;
+      }
+    }
+
+    function showAsk(on) {
+      var box = byId('rt-ask');
+      box.style.display = on ? 'flex' : 'none';
+      box.dataset.ask = on ? String(Date.now()) : '';
+      byId('rt-ask-where').textContent = useOpener ?
+        'Go to the first tab, where the router page is.' : 'Use the router page below.';
+      document.querySelector('.view').classList.toggle('big', on && !useOpener);
+      watching = on;
+    }
+
+    // The demo never presses Reset: it opens the page with the button, asks the operator,
+    // and writes down the dialog, the operator's clicks and the restart.
+    // Returns false when the operator chose to test without a reset
+    async function operatorReset() {
+      begin('reset', 'Opening the page with Factory default > Reset.');
       await openDetails();
-      var reset = await waitFor('the factory Reset button', function () {
+      await waitFor('the factory Reset button', function () {
         return find('#factorydefaultbtn button');
       });
       var before = visibleButtons();
-      log('TRYING', 'clicking Factory default > Reset');
+      var drops = link.drops;
+      var lastSet = '';
+      resetState = 'asking';
+      resetClickAt = '';
+      log('TRYING', 'asking the operator to press Factory default > Reset. The demo does not press it');
       // The page can die with the unit, so keep what is known so far
       saveLog();
-      resetPressedAt = clock(new Date(), ':');
-      remember(SIGNED_KEY, '');
-      press(reset, 'Factory default > Reset');
-      var confirm;
+      watchClicks();
+      showAsk(true);
+      setCard('ASK', 'YOUR TURN', 'Model, serial and MAC match the label.',
+        'Press Factory default > Reset on the router and confirm.');
+      explain('Waiting for you to press Reset on the router.');
+      beep();
+      var end = Date.now() + RESET_ASK_MS;
       try {
-        confirm = await waitFor('the reset confirm button', function () { return confirmButton(before); });
-      } catch (e) {
-        log('SAW', 'new buttons on page: ' + newButtons(before).map(text).join(', '));
-        throw giveUp('Reset was pressed, but no known confirm button appeared.', 'Check the unit and reset it by hand if needed.');
+        while (link.drops === drops) {
+          if (resetState === 'skip') {
+            log('TRYING', 'the operator chose to test without a reset');
+            return false;
+          }
+          if (Date.now() > end) {
+            throw giveUp('No reset was seen in ' + Math.round(RESET_ASK_MS / 60000) + ' minutes.',
+              'Scan again when you are ready to reset the unit.');
+          }
+          watchClicks();
+          var fresh = newButtons(before);
+          var set = buttonNames(fresh);
+          if (set !== lastSet) {
+            if (set) {
+              log('SAW', 'new buttons on the router page: ' + set);
+              var box = dialogOf(fresh);
+              log('SAW', 'around them: ' + (maskText(leaves().filter(function (el) {
+                return box.contains(el);
+              }).map(text).join(' | ')) || '(no text)'));
+            } else if (lastSet) {
+              log('SAW', 'those buttons are gone, page ' + routerPage());
+            }
+            lastSet = set;
+          }
+          await wait(200);
+        }
+      } finally {
+        showAsk(false);
       }
-      // The confirm dialog is not captured yet, so the first real run writes it down
-      log('SAW', 'buttons after Reset: ' + newButtons(before).map(text).join(', '));
-      log('TRYING', 'confirming with button "' + text(confirm) + '"');
-      var drops = link.drops;
-      press(confirm, 'confirm button "' + text(confirm) + '"');
-      report('Factory reset', 'PASS', 'confirmed');
-      begin('restart', 'Waiting for the router to go down and come back.');
-      await waitForRouterEvent(function () { return link.drops > drops; }, RESTART_START_MS,
-        'The router did not restart after the reset.', 'Check the unit and reset it by hand if needed.');
-      explain('Router is down. Waiting for it to come back.');
+      remember(SIGNED_KEY, '');
+      resetState = resetClickAt ? 'pressed' : 'no click';
+      if (resetClickAt) {
+        report('Factory reset', 'PASS', 'pressed by the operator at ' + resetClickAt);
+      } else {
+        log('SAW', 'the router went down, but no click on Reset was seen on its page');
+        report('Factory reset', 'INFO', 'router restarted, no Reset click seen');
+      }
+      begin('restart', 'Router is down. Waiting for it to come back.');
       await waitForRouterEvent(function () { return link.up; }, RESTART_END_MS,
         'The router did not come back after the reset.', 'Check the power and the light.');
       report('Back up', 'PASS');
       // The web page answers before the login service is ready
       explain('Router is back. Waiting for its services to start.');
       await wait(SETTLE_MS);
+      return true;
     }
 
     // This tab stays open, so a second scan does not reset twice
@@ -973,7 +1103,13 @@
       if (why) log('WHY', why);
       if (next) log('DO NEXT', next);
       log('STATIONS', 'DATA-WIPE ' + wipe.value + ', TESTING ' + testing + ', REFURB ' + visual);
-      log('FACTORY RESET', resetPressedAt ? 'pressed by the demo at ' + resetPressedAt : 'not pressed by the demo in this run');
+      log('LINK', runDrops + ' drop(s) during this run' + (runDrops ? ', longest ' + runLongest + 's' : ''));
+      log('FACTORY RESET', {
+        pressed: 'pressed by the operator at ' + resetClickAt,
+        'no click': 'router restarted while the demo waited, but no click on Reset was seen',
+        skipped: 'skipped by the operator'
+      }[resetState] || 'not pressed in this run');
+      log('FACTORY RESET', 'the demo never presses Reset');
       saveLog();
       saveResult();
       var runs = todayRuns().concat([{ result: overall, seconds: seconds, fail: firstFail() }]);
@@ -992,7 +1128,10 @@
 
     function clearRun() {
       checks = [];
-      resetPressedAt = '';
+      resetState = '';
+      resetClickAt = '';
+      runDrops = 0;
+      runLongest = 0;
       wipe = { value: 'NOT-RUN', detail: '' };
       testing = 'NOT-RUN';
       visual = 'PENDING';
@@ -1099,17 +1238,25 @@
           wipe = { value: 'PASS', detail: 'Reset before this run' };
         } else {
           stage = 'reset';
-          await factoryReset();
-          rememberReset(label);
-          stage = 'second login';
-          begin('link', 'Waiting for the login page after the reset.');
-          if (!await logIn(label, true)) {
-            report('Login', 'FAIL', 'label rejected after reset');
-            wipe = { value: OLP_FAIL, detail: 'Label rejected after reset' };
-            finish('FAIL', 'The label was rejected after the reset.', 'Check the unit by hand.');
-            return;
+          if (!await operatorReset()) {
+            resetState = 'skipped';
+            report('Factory reset', 'INFO', 'skipped by the operator');
+            setStep('restart', 'skipped');
+            setStep('login2', 'skipped');
+            wipe = { value: 'NOT-RUN', detail: 'Reset skipped by the operator' };
+          } else {
+            stage = 'second login';
+            rememberReset(label);
+            begin('link', 'Waiting for the login page after the reset.');
+            if (!await logIn(label, true)) {
+              report('Login', 'FAIL', 'label rejected after reset');
+              wipe = { value: OLP_FAIL, detail: 'Label rejected after reset' };
+              finish('FAIL', 'The label was rejected after the reset.', 'Check the unit by hand.');
+              return;
+            }
+            wipe = resetState === 'pressed' ? { value: 'PASS', detail: 'Reset by the operator, then logged in with the label' } :
+              { value: 'NOT-RUN', detail: 'Router restarted, but no Reset click was seen' };
           }
-          wipe = { value: 'PASS', detail: 'Reset, then logged in with the label' };
           stage = 'testing';
         }
         var passed = await testAfterLogin(label, true);
@@ -1120,9 +1267,9 @@
         logPage();
         // A stop is the demo not finishing, which says nothing about the unit, so the
         // unit is never failed for it
-        if (stage === 'reset' || stage === 'second login') wipe = { value: OLP_FAIL, detail: e.message };
+        if (stage === 'second login') wipe = { value: OLP_FAIL, detail: e.message };
         var next = e.next || { 'first login': 'Read the log below, then scan again.',
-          reset: 'Check the unit and reset it by hand if needed.',
+          reset: 'Scan again when you are ready to reset the unit.',
           'second login': 'The reset was done. Scan again when the router is up.',
           testing: 'Scan again to finish the tests.' }[stage];
         finish('NOT TESTED', e.message, next);
@@ -1155,6 +1302,9 @@
     byId('rt-save').onclick = saveLog;
     byId('rt-copy').onclick = function () { navigator.clipboard.writeText(logLines.join('\r\n')); };
     green.onclick = function () { greenSeen = true; };
+    byId('rt-skip').onclick = function () { if (resetState === 'asking') resetState = 'skip'; };
+    win.addEventListener('offline', function () { log('SAW', 'this PC says it lost its network'); });
+    win.addEventListener('online', function () { log('SAW', 'this PC says its network is back'); });
 
     function setVisual(value) {
       visual = value;
