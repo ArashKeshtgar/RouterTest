@@ -12,7 +12,7 @@
 (function () {
   function main(win, origin) {
     var document = win.document;
-    var VERSION = 'fastmile demo v9';
+    var VERSION = 'fastmile demo v10';
     win.RT_VERSION = VERSION;
     // OLP's two results for every station are PASS and this
     var OLP_FAIL = 'FAIL-FAIL';
@@ -32,6 +32,9 @@
     var READY_MS = 300000;
     var REOPEN_MS = 20000;
     var SETTLE_MS = 20000;
+    // A logged-out router draws its logged-in page for a moment before it sends the
+    // browser to the login page, so being logged in only counts if it lasts this long
+    var SESSION_MS = 8000;
     var CONNECT_MS = 120000;
     var RECHECK_MS = 5000;
     var GREEN_MS = 120000;
@@ -100,7 +103,9 @@
       '</small></div><div id="rt-link">Checking the router…</div></div>' +
       '<div class="scan"><label for="rt-scan">Scan the QR code on the back of the unit</label>' +
       '<div class="scanrow"><input id="rt-scan" autocomplete="off"><button id="rt-start">Start</button>' +
-      '<button id="rt-stop" disabled>Stop test</button></div><div id="rt-unit"></div></div>' +
+      '<button id="rt-stop" disabled>Stop test</button>' +
+      '<button id="rt-clear" title="Clears this screen. Does not touch the router.">Reset page</button>' +
+      '</div><div id="rt-unit"></div></div>' +
       '<div class="main"><ol class="steps" id="rt-steps"></ol><div class="side">' +
       '<div id="rt-card"><div id="rt-big">READY</div><div id="rt-why">Waiting for a scan.</div><div id="rt-next"></div></div>' +
       '<button id="rt-green">The light is green</button>' +
@@ -346,10 +351,20 @@
       }
     }
 
+    // A change after the # moves inside the same page, so that page is not stale
+    function samePage(address) {
+      try {
+        var now = routerWindow().location;
+        return now.origin + now.pathname === new URL(address).origin + new URL(address).pathname;
+      } catch (e) {
+        return false;
+      }
+    }
+
     function openRouter() {
       var address = origin + ADDRESSES[addressIndex % ADDRESSES.length];
       addressIndex++;
-      stalePage = routerDocument();
+      stalePage = samePage(address) ? null : routerDocument();
       log('TRYING', 'open ' + address);
       if (useOpener) win.opener.location.href = address;
       else frame.src = address;
@@ -627,6 +642,7 @@
     async function waitForRouter(afterReset) {
       var end = Date.now() + READY_MS;
       var opened = Date.now();
+      var inSince = 0;
       addressIndex = 0;
       openRouter();
       while (Date.now() < end) {
@@ -636,7 +652,8 @@
           log('SAW', 'login box found after ' + Math.round((Date.now() - stepStarted) / 1000) + 's, page ' + routerPage());
           return boxes;
         }
-        if (!afterReset && find('div.sidenav-logout')) {
+        inSince = !afterReset && find('div.sidenav-logout') ? inSince || Date.now() : 0;
+        if (inSince && Date.now() - inSince >= SESSION_MS) {
           log('SAW', 'already logged in');
           return null;
         }
@@ -711,7 +728,10 @@
 
     async function checkIdentity(label) {
       await openDetails();
-      await waitFor('the serial number', function () { return valueOf('Serial number'); });
+      await waitFor("the serial number on the router's page", function () {
+        if (loginBoxes()) throw giveUp('The router went back to its login page.', 'Scan again.');
+        return valueOf('Serial number');
+      });
       var name = await readTwice(function () { return valueOf('Device name'); }, present);
       var ok = reportRead('Model', name, name.value === MODEL, name.value);
       var serial = await readTwice(function () { return valueOf('Serial number'); }, present);
@@ -912,6 +932,7 @@
       busy = false;
       byId('rt-stop').disabled = true;
       byId('rt-start').disabled = false;
+      byId('rt-clear').disabled = false;
       scan.focus();
     }
 
@@ -936,6 +957,20 @@
       });
     }
 
+    // Only this screen: the router is not touched, and a unit stays marked as reset
+    function clearScreen() {
+      log('TRYING', 'page reset by the operator, the router was not touched');
+      clearRun();
+      started = 0;
+      unit = null;
+      scan.value = '';
+      byId('rt-unit').textContent = '';
+      setCard('', 'READY', 'Waiting for a scan.', '');
+      addressIndex = 0;
+      openRouter();
+      scan.focus();
+    }
+
     async function run(label) {
       var stage = 'first login';
       busy = true;
@@ -944,6 +979,7 @@
       logLines = logLines.slice(-400);
       byId('rt-stop').disabled = false;
       byId('rt-start').disabled = true;
+      byId('rt-clear').disabled = true;
       logStation();
       begin('label', 'Reading the label.');
       log('SAW', 'label model code ' + String(label.N).slice(0, 20));
@@ -963,13 +999,13 @@
             'Reset the unit by hand, then scan again.');
           return;
         }
-        stage = 'testing';
         begin('identity', 'Comparing the unit with the label before the reset.');
         if (!await checkIdentity(label)) {
           testing = OLP_FAIL;
           finish('FAIL', 'The unit does not match the label. It was not reset.', 'Check that this QR belongs to this unit.');
           return;
         }
+        stage = 'testing';
         if (alreadyReset(label)) {
           begin('reset', 'This unit was already reset.');
           report('Factory reset', 'INFO', 'already reset');
@@ -998,7 +1034,7 @@
       } catch (e) {
         log('SAW', 'stopped during ' + stage + ': ' + e.message);
         logPage();
-        // No login means the tool never reached the unit, which says nothing about it
+        // Until the unit has been read, a stop says nothing about the unit
         if (stage === 'testing') testing = OLP_FAIL;
         else if (stage !== 'first login') wipe = { value: OLP_FAIL, detail: e.message };
         var next = e.next || { 'first login': 'Read the log below, then scan again.',
@@ -1031,6 +1067,7 @@
     scan.addEventListener('input', startFromScan);
     byId('rt-start').onclick = startFromScan;
     byId('rt-stop').onclick = function () { cancelled = true; };
+    byId('rt-clear').onclick = clearScreen;
     byId('rt-save').onclick = saveLog;
     byId('rt-copy').onclick = function () { navigator.clipboard.writeText(logLines.join('\r\n')); };
     green.onclick = function () { greenSeen = true; };

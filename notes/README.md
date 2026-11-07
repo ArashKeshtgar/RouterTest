@@ -74,8 +74,11 @@ Right-click each item -> Inspect -> note its `id` or a unique attribute:
   clicked on another site's login page. The log kept only the path `/login`. Logs
   now keep the address, and off a private address the demo goes to 192.168.1.1
   without starting.
-- [ ] Does the router allow its page inside the station (X-Frame-Options)? If not,
-  v8 runs it in the first tab, as a background tab, which is less tested.
+- The router refuses to show inside the station, so it runs in the first tab.
+- The second bench run (2026-11-06, v9) reached a Gateway 12 but never logged in. A
+  logged-out unit draws the sidenav and the map for a moment before going to its
+  login page, and the demo took that for a login. The first tab was also already on
+  the login page, and opening the same address did not reload it. v10 fixes both.
 - [ ] Does the 3.2's label have the same JSON QR?
 - [ ] Does the unit lock the login after failed attempts? After how many?
 - [ ] Does a freshly reset unit accept the label password, or force a new one?

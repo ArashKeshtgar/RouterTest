@@ -26,6 +26,7 @@ def fast(code):
         ("var RECHECK_MS = 5000", "var RECHECK_MS = 20"),
         ("var GREEN_MS = 120000", "var GREEN_MS = 30"),
         ("var SETTLE_MS = 20000", "var SETTLE_MS = 0"),
+        ("var SESSION_MS = 8000", "var SESSION_MS = 400"),
         ("var CONNECT_MS = 120000", "var CONNECT_MS = 1000"),
         ("var LOGIN_WAIT_MS = 90000", "var LOGIN_WAIT_MS = 1000"),
     ):
@@ -122,6 +123,11 @@ function cellular() {
 }
 function route() {
   clearTimeout(drawing);
+  if (!loggedIn && unit.flash && location.hash !== '#/login') {
+    show('<div role="button" class="mapClickArea">Gateway</div>');
+    drawing = setTimeout(login, unit.flash);
+    return;
+  }
   if (!loggedIn) return login();
   if (location.hash === '#/wan/cellular-status') return cellular();
   overview();
@@ -504,6 +510,69 @@ def test_changed_password_tells_operator_to_reset_and_tries_once(router):
     assert " | NOT TESTED | " in bench.run()
     assert "Reset the unit by hand" in bench.station.inner_text("#rt-next")
     assert bench.counts["signIns"] == 1
+
+
+# As on the bench: the router will not show in a frame, its address leads to /web_whw/,
+# and the first tab already sits on the login page
+NO_FRAMES = FAST.replace("var READY_MS = 1500", "var READY_MS = 8000").replace(
+    "var REOPEN_MS = 500", "var REOPEN_MS = 5000")
+
+
+def bench_router(router, **changes):
+    bench = router(block_frames=True, **changes)
+    bench.home = "/web_whw/"
+    return bench
+
+
+def test_page_already_on_the_login_box_is_used_at_once(router):
+    bench = bench_router(router)
+    assert " | PASS | " in bench.run(NO_FRAMES)
+    assert "no login box on page" not in bench.log()
+
+
+def test_logged_in_page_that_flashes_before_the_login_page_is_not_trusted(router):
+    bench = bench_router(router, flash=100)
+    bench.run(NO_FRAMES)
+    bench.state["loggedIn"] = False
+    assert " | PASS | " in bench.run()
+    assert "already logged in" not in bench.log()
+    assert bench.counts["signIns"] == 3
+
+
+def test_router_going_back_to_login_during_the_identity_check_fails_nothing(router):
+    bench = bench_router(router, flash=1500)
+    bench.run(NO_FRAMES.replace("var SESSION_MS = 400", "var SESSION_MS = 50"))
+    bench.state["loggedIn"] = False
+    result = bench.run()
+    assert " | NOT TESTED | The router went back to its login page." in result
+    assert bench.counts["resets"] == 1
+    assert "STATIONS: DATA-WIPE NOT-RUN, TESTING NOT-RUN" in bench.log()
+
+
+def test_reset_page_clears_the_screen_and_leaves_the_router_alone(router):
+    bench = router(signal="Searching")
+    bench.run()
+    resets = bench.counts["resets"]
+    assert bench.station.is_enabled("#rt-clear")
+    bench.station.click("#rt-clear")
+    assert bench.station.inner_text("#rt-big") == "READY"
+    assert bench.station.inner_text("#rt-unit") == ""
+    assert not bench.station.is_visible("#rt-result")
+    assert bench.station.locator("#rt-steps li.done, #rt-steps li.failed").count() == 0
+    assert bench.counts["resets"] == resets
+    assert " | " in bench.run()
+    assert bench.counts["resets"] == resets
+
+
+def test_reset_page_is_off_while_a_test_runs(router):
+    bench = router()
+    bench.page_html = UNREADY_PAGE
+    bench.open_station(FAST.replace("var READY_MS = 1500", "var READY_MS = 30000"))
+    bench.scan()
+    assert bench.station.is_disabled("#rt-clear")
+    bench.station.click("#rt-stop")
+    bench.finished()
+    assert bench.station.is_enabled("#rt-clear")
 
 
 def test_already_logged_in_skips_sign_in(router):

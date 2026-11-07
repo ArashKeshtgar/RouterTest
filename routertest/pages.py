@@ -63,6 +63,8 @@ _NOKIA = {
     "reset_button": "TODO",
 }
 
+# On a logged-out unit the sidenav and the map show for a moment before the app
+# goes to its login page, so one sighting of them does not prove a login.
 # The buttons have no ids, so Sign in and the error dialog are found by their
 # English text. The dialog counts failed logins, and the unit seems to lock after
 # about 3, so the tool only ever tries once per reset.
