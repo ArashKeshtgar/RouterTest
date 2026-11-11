@@ -73,9 +73,32 @@ PROFILES["gateway_12_fastmile"] = {
     "username": "#username-login-value",
     "password": "#passwordLoginAria",
     "submit": 'button[type="button"]:has-text("Sign in")',
-    "logged_in": 'div[role="button"].mapClickArea',
+    # Right after Sign in the unit shows /prelogin: the sign-out control is there,
+    # the Network map is not yet (bench logs, demo v13). Only read after Sign in.
+    "logged_in": "div.sidenav-logout",
     "login_error": 'div:has-text("Invalid login credentials")',
     "open_details": 'div[role="button"].mapClickArea',
+    # Seen on the bench by the Chrome demo before asking the operator to press it.
+    # Its confirm dialog is still not captured: the station records it on its
+    # first real reset and asks the operator if it cannot tell the confirm button.
+    "reset_button": "#factorydefaultbtn button",
+    # Used by the station (routertest/station.py), read by visible label text
+    "model_name": "FastMile 5G Gateway 12",
+    "labels": {
+        "model": "Device name",
+        "serial": "Serial number",
+        "mac": "MAC address",
+        "software": "Software version",
+        "imei": "IMEI",
+        "sim": "Status",
+    },
+    # Overview rows: the value is the next text after the row's name
+    "overview_rows": {
+        "5g": r"^5G\+? Signal$",
+        "wifi_2.4": r"^WiFi 2\.4 GHz$",
+        "wifi_5": r"^WiFi 5 GHz$",
+        "wifi_6": r"^WiFi 6 GHz$",
+    },
 }
 # Same app in an older build: its elements have no role attributes or button
 # ids, so the Gateway 12's login and map selectors do not carry over. Its login
