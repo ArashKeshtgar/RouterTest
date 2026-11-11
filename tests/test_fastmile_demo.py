@@ -30,8 +30,10 @@ def fast(code):
         ("var GREEN_MS = 120000", "var GREEN_MS = 30"),
         ("var SETTLE_MS = 20000", "var SETTLE_MS = 0"),
         ("var SESSION_MS = 8000", "var SESSION_MS = 400"),
+        ("var LOGGED_IN_WAIT = 20000", "var LOGGED_IN_WAIT = 600"),
         ("var CONNECT_MS = 120000", "var CONNECT_MS = 1000"),
         ("var LOGIN_WAIT_MS = 90000", "var LOGIN_WAIT_MS = 1000"),
+        ("var RELOGIN_GRACE_MS = 5000", "var RELOGIN_GRACE_MS = 200"),
         ("var RESET_ASK_MS = 600000", "var RESET_ASK_MS = 5000"),
     ):
         code = code.replace(old, new)
@@ -52,7 +54,16 @@ const detail = (k, v) => `<div class="left"><div class="text"><pv-text><div>${k}
 const cell = (k, v) => `<div class="list"><div class="left"><div class="text"><pv-text><div>${k}</div>
   </pv-text></div></div><div class="right"><pv-text><div>${v}</div></pv-text></div></div>`;
 const nav = '<div class="sidenav-logout flex-row__spacebetween"><div>Sign Out</div></div>';
-function show(html) { app.innerHTML = nav + html; }
+function show(html) {
+  app.innerHTML = nav + html;
+  // Sign Out on every logged-in page, as on the real router
+  app.querySelector('.sidenav-logout').onclick = () => {
+    tell('logout');
+    loggedIn = false;
+    location.hash = '#/login';
+    route();
+  };
+}
 function login() {
   app.innerHTML = `<div class="pos-relative">English</div><pv-text><div>Username</div></pv-text>
     <input id="username-login-value"><pv-text><div>Password</div></pv-text>
@@ -72,8 +83,16 @@ function login() {
     if (u.value === unit.user && p.value === unit.password) {
       tell('loggedIn');
       loggedIn = true;
-      location.hash = '#/overview';
-      if (location.hash === '#/overview') route();
+      if (unit.prelogin) {
+        // The real router keeps the login form up for a moment after Sign in, then
+        // shows a logged-in page with the sign-out control but no Network map yet
+        // (/prelogin), then the overview.
+        setTimeout(() => show('<div>Please wait</div>'), unit.prelogin);
+        setTimeout(() => { location.hash = '#/overview'; route(); }, unit.prelogin * 2);
+      } else {
+        location.hash = '#/overview';
+        if (location.hash === '#/overview') route();
+      }
     } else {
       document.getElementById('err').innerHTML =
         '<div>Invalid login credentials. Login attempt failed 1 time</div>' +
@@ -685,6 +704,160 @@ def test_page_already_on_the_login_box_is_used_at_once(router):
     assert "no login box on page" not in bench.log()
 
 
+def test_prelogin_page_after_sign_in_is_a_good_login_not_a_retry(router):
+    # The Gateway 12 keeps the login form up for a moment after Sign in, then shows a
+    # logged-in page with the sign-out control but no Network map (/prelogin). The demo
+    # must read that as a finished login and move on, not take the lingering form as the
+    # router going back to the login page and log in again.
+    bench = bench_router(router, prelogin=150)
+    result = bench.run(NO_FRAMES)
+    assert " | PASS | " in result
+    assert "went back to its login page" not in bench.log()
+    assert bench.counts["signIns"] == 2
+    assert bench.counts["resets"] == 1
+
+
+def test_scan_typed_on_the_router_tab_is_caught_and_starts_the_run(router):
+    # A barcode scanner is a keyboard. When the operator is looking at the router tab,
+    # it types the label there, not in the scan box, and its Enter would move the router
+    # page. v14 catches the label on the router page too and starts the run from it.
+    bench = bench_router(router)
+    bench.open_station(NO_FRAMES)
+    bench.station.wait_for_selector("#rt-link.up")
+    bench.first.evaluate(
+        """(s) => {
+          for (const ch of s) document.dispatchEvent(
+            new KeyboardEvent('keydown', {key: ch, bubbles: true, cancelable: true}));
+          document.dispatchEvent(
+            new KeyboardEvent('keydown', {key: 'Enter', bubbles: true, cancelable: true}));
+        }""",
+        json.dumps(LABEL),
+    )
+    result = bench.finished()
+    assert " | PASS | " in result
+    assert bench.counts["signIns"] == 2
+
+
+def test_hand_typing_on_the_router_that_is_not_a_label_is_left_alone(router):
+    # Only a burst that starts with "{" is taken as a scan; anything else the operator
+    # types on the router page is not swallowed and does not start a run.
+    bench = bench_router(router)
+    bench.open_station(NO_FRAMES)
+    bench.station.wait_for_selector("#rt-link.up")
+    swallowed = bench.first.evaluate(
+        """() => {
+          const e = new KeyboardEvent('keydown', {key: 'a', bubbles: true, cancelable: true});
+          document.dispatchEvent(e);
+          return e.defaultPrevented;
+        }"""
+    )
+    assert swallowed is False
+    bench.station.wait_for_timeout(300)
+    assert bench.station.is_hidden("#rt-result")
+    assert bench.counts["signIns"] == 0
+
+
+def test_start_strips_a_scanner_prefix_and_suffix_around_the_label(router):
+    # A scanner can wrap the JSON in a stray character and a trailing newline. The demo
+    # reads the outermost {...} and runs from it.
+    bench = router()
+    bench.open_station()
+    bench.station.wait_for_selector("#rt-link.up")
+    noisy = "]" + json.dumps(LABEL) + "\n"
+    bench.station.evaluate("(s) => { document.getElementById('rt-scan').value = s; }", noisy)
+    bench.station.click("#rt-start")
+    assert " | PASS | " in bench.finished()
+
+
+def test_start_on_an_unreadable_scan_says_scan_again(router):
+    # A press that cannot be read must say so, not sit silent as if the button is dead.
+    bench = router()
+    station = bench.open_station()
+    station.wait_for_selector("#rt-link.up")
+    station.evaluate("() => { document.getElementById('rt-scan').value = 'not a label'; }")
+    station.click("#rt-start")
+    station.wait_for_timeout(200)
+    assert "SCAN AGAIN" in station.inner_text("#rt-big")
+    assert "Could not read the label" in station.inner_text("#rt-why")
+    assert station.input_value("#rt-scan") == ""
+    assert bench.counts["signIns"] == 0
+
+
+def test_scanner_prefix_sets_the_slot_and_still_runs(router):
+    # An optional "$SLT0n" prefix from the scanner says which bench slot the unit is in.
+    # The demo reads the slot, drops the prefix and runs from the label as usual.
+    bench = router()
+    bench.open_station()
+    bench.station.wait_for_selector("#rt-link.up")
+    bench.station.evaluate(
+        "(s) => { document.getElementById('rt-scan').value = '$SLT03' + s; }",
+        json.dumps(LABEL),
+    )
+    bench.station.click("#rt-start")
+    assert " | PASS | " in bench.finished()
+    assert "unit slot 3" in bench.log()
+
+
+def test_scanner_prefix_on_the_router_tab_is_captured_with_its_slot(router):
+    # The prefix also lets the capture start reliably when the scan lands on the router
+    # tab, not only on the label's "{".
+    bench = bench_router(router)
+    bench.open_station(NO_FRAMES)
+    bench.station.wait_for_selector("#rt-link.up")
+    bench.first.evaluate(
+        """(s) => {
+          for (const ch of ('$SLT02' + s)) document.dispatchEvent(
+            new KeyboardEvent('keydown', {key: ch, bubbles: true, cancelable: true}));
+          document.dispatchEvent(
+            new KeyboardEvent('keydown', {key: 'Enter', bubbles: true, cancelable: true}));
+        }""",
+        json.dumps(LABEL),
+    )
+    assert " | PASS | " in bench.finished()
+    assert "unit slot 2" in bench.log()
+
+
+def test_pasting_the_label_into_the_box_runs_the_test(router):
+    # No scanner at all: the operator pastes the label JSON into the scan box and it runs.
+    bench = router()
+    bench.open_station()
+    bench.station.wait_for_selector("#rt-link.up")
+    bench.station.evaluate(
+        """(s) => {
+          const box = document.getElementById('rt-scan');
+          box.focus();
+          box.value = s;
+          box.dispatchEvent(new ClipboardEvent('paste', {bubbles: true}));
+        }""",
+        json.dumps(LABEL),
+    )
+    assert " | PASS | " in bench.finished()
+    assert bench.counts["signIns"] == 2
+
+
+def test_a_slot_barcode_scanned_first_sets_the_slot_for_the_next_label(router):
+    # The operator scans a "$SLT0n" slot barcode first. It is not a label, so the demo
+    # does not fail it: it remembers the slot, takes focus and asks for the QR. The next
+    # label scan then runs under that slot.
+    bench = router()
+    station = bench.open_station()
+    station.wait_for_selector("#rt-link.up")
+    station.evaluate(
+        """() => {
+          const box = document.getElementById('rt-scan');
+          box.value = '$SLT04';
+          box.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true, cancelable: true}));
+        }"""
+    )
+    station.wait_for_timeout(150)
+    assert "SLOT 4" in station.inner_text("#rt-big")
+    assert bench.counts["signIns"] == 0
+    assert station.input_value("#rt-scan") == ""
+    bench.scan()
+    assert " | PASS | " in bench.finished()
+    assert "unit slot 4" in bench.log()
+
+
 def test_logged_in_page_that_flashes_before_the_login_page_is_not_trusted(router):
     bench = bench_router(router, flash=100)
     bench.run(NO_FRAMES)
@@ -769,10 +942,33 @@ def test_reset_page_is_off_while_a_test_runs(router):
     assert bench.station.is_enabled("#rt-clear")
 
 
-def test_a_login_the_demo_did_not_make_is_not_trusted(router):
+def test_a_unit_left_logged_in_by_someone_else_is_signed_out_then_tested(router):
+    # Seen on the bench: the unit arrived still logged in (/prelogin, sign-out control
+    # showing). The demo does not use a login it did not make; it signs it out, logs in
+    # with the label, and the test goes on as usual.
     bench = router(loggedIn=True)
-    result = bench.run()
-    assert " | NOT TESTED | The router answers, but the login box never appeared." in result
+    result = bench.run(FAST.replace("var READY_MS = 1500", "var READY_MS = 8000"))
+    assert " | PASS | " in result
+    log = bench.log()
+    assert "already logged in, not by this demo: signing it out (1)" in log
+    assert "CLICK: Sign out" in log
+    assert bench.counts["signIns"] == 2 and bench.counts["resets"] == 1
+
+
+def test_a_unit_that_will_not_sign_out_tells_the_operator(router):
+    # If Sign out does nothing, the demo stops after two tries and says what to do,
+    # instead of waiting out the whole timeout.
+    # Frames blocked, so the router page is the first tab, where we break Sign out
+    bench = bench_router(router, loggedIn=True)
+    bench.open_station(NO_FRAMES)
+    bench.first.evaluate(
+        "() => { setInterval(() => { const o = document.querySelector('.sidenav-logout');"
+        " if (o) o.onclick = null; }, 20); }"
+    )
+    bench.scan()
+    result = bench.finished()
+    assert " | NOT TESTED | The unit is already logged in and did not sign out." in result
+    assert "Press Sign out on the router page" in bench.station.inner_text("#rt-next")
     assert bench.counts["signIns"] == 0 and bench.counts["resets"] == 0
 
 
