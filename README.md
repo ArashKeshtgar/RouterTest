@@ -50,14 +50,35 @@ To see a unit whose admin password was changed, start the mock with
 http://127.0.0.1:7357/hardware-reset (it stands in for the button on the back),
 then press Enter.
 
-## Run against a real unit
+## Run against a real unit: the station
 
-1. Connect the PC directly to the unit's **yellow LAN port** with a cable.
-   The PC is not connected to any other network.
-2. Fill in the model's profile in `routertest/pages.py` from the real admin page
-   (see `notes/README.md`). Until then `--real` refuses to run. The tool picks
-   the profile from the model field of the QR label.
-3. `python -m routertest.cli --real`
+The station is a local page that runs the whole test with Playwright. Supported
+model: Gateway 12 FastMile (label N `5G31-03W-B`).
+
+1. Connect the PC to the unit's LAN port with a cable.
+2. Start it, then open http://127.0.0.1:7360 in Chrome:
+
+   ```bash
+   python -m routertest.station
+   ```
+
+3. Scan (or paste) the unit's QR label into the station's scan box.
+
+Playwright then logs in with the label, checks model, serial and MAC, presses
+Factory default > Reset and its confirm, waits for the restart, logs in again,
+and reads IMEI, SIM, 5G and the three Wi-Fi bands twice each. The operator only
+answers two questions on the page: is the light green, and does the unit look
+right. The right half of the page is a live view of the router page Playwright
+is on; a click there is passed on to the router. If the reset's confirm button
+is not one the station knows, it asks the operator to click it on that view.
+
+Untick "Factory reset the unit" to test without a reset. A unit left logged in
+by someone else is signed out after 20 seconds and logged in with the label.
+Reports and a masked log go to `reports/` (git-ignored). `--show-browser` also
+opens the router browser in its own window; `--router` changes the address.
+
+The Chrome bookmarklet in `browser/` does the same test without installing
+anything, but it needs the router page open and the scan aimed at the right tab.
 
 ## Tests
 
@@ -78,7 +99,8 @@ routertest/
   admin.py        browser actions on the admin page (Playwright)
   checks.py       test steps -> PASS/FAIL + time + reason
   report.py       CSV and HTML report
-  cli.py          operator entry point
+  cli.py          mock runs from the terminal
+  station.py      the station: local page + Playwright, full test on a real unit
   mock_server.py  fake admin page for development
 browser/          page capture and FastMile demo that run inside Chrome, no install (build.py makes the bookmarklets)
 samples/          fake label data only
