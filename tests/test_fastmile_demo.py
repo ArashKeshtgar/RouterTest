@@ -1,8 +1,9 @@
 """The FastMile test station, run on a copy of the real page's structure. The login,
 overview, details and cellular pages follow the Gateway 12 captures v1 to v5.
 The router's own address redirects to its login page, as the operator sees it.
-The reset confirm dialog and the restart timing are still guesses. The demo never
-presses Reset: a stand-in operator presses it on the router page when asked."""
+The reset confirm dialog and the restart timing are still guesses. Most tests run with
+the "presses Reset itself" box unticked, where a stand-in operator presses it on the
+router page when asked; the AUTO tests run with it ticked, as the demo starts."""
 
 import importlib.util
 import json
@@ -35,12 +36,17 @@ def fast(code):
         ("var LOGIN_WAIT_MS = 90000", "var LOGIN_WAIT_MS = 1000"),
         ("var RELOGIN_GRACE_MS = 5000", "var RELOGIN_GRACE_MS = 200"),
         ("var RESET_ASK_MS = 600000", "var RESET_ASK_MS = 5000"),
+        ("var AUTO_RESET = true", "var AUTO_RESET = false"),
+        ("var CONFIRM_WAIT_MS = 8000", "var CONFIRM_WAIT_MS = 1500"),
+        ("var RESET_DROP_MS = 120000", "var RESET_DROP_MS = 3000"),
     ):
         code = code.replace(old, new)
     return code
 
 
 FAST = fast(SOURCE)
+# As the demo starts: it presses Reset and its confirm itself
+AUTO = FAST.replace("var AUTO_RESET = false", "var AUTO_RESET = true")
 
 APP = """<!doctype html><title>Router</title>
 <div id="app"></div>
@@ -133,11 +139,16 @@ function details() {
   document.querySelector('#rebootButton button').onclick = () => tell('reboots');
 }
 function askToConfirm() {
+  if (unit.native) {
+    if (confirm(unit.native)) { tell('resets'); tell('restart'); } else tell('cancels');
+    return;
+  }
+  if (unit.noConfirm) { tell('resets'); tell('restart'); return; }
   const dialog = document.createElement('div');
   dialog.innerHTML = `<button id="no">Cancel</button><button id="yes">${unit.confirm}</button>`;
   app.appendChild(dialog);
   document.getElementById('no').onclick = () => tell('cancels');
-  document.getElementById('yes').onclick = () => { tell('resets'); tell('restart'); };
+  document.getElementById('yes').onclick = () => { tell('resets'); if (!unit.noRestart) tell('restart'); };
 }
 function cellular() {
   show(cell('SIM', 'ROGERS') + cell('Type', 'Removable') + cell('Status', 'Valid') +
@@ -202,6 +213,9 @@ def unit(**changes):
         "ssid": LABEL["ID"],
         "loggedIn": False,
         "confirm": "Reset",
+        "native": "",
+        "noConfirm": False,
+        "noRestart": False,
     }
     return {**values, **changes}
 
@@ -373,7 +387,7 @@ def test_every_click_is_in_the_log_and_the_reset_is_named(router):
     clicks = [line.split("] CLICK: ")[1] for line in log.splitlines() if "] CLICK: " in line]
     assert clicks == ["Sign in", "the device on the Network map, to open its details", "Sign in"]
     assert "FACTORY RESET: pressed by the operator at " in log
-    assert "FACTORY RESET: the demo never presses Reset" in log
+    assert "FACTORY RESET: the demo does not press Reset (box not ticked)" in log
     assert 'OPERATOR CLICK: button "Reset"' in log
     assert 'OPERATOR CLICK: button id=yes "Reset"' in log
 
@@ -650,7 +664,7 @@ def test_drops_say_how_long_and_during_which_step(router):
     bench = router()
     bench.run()
     log = bench.log()
-    assert 'router stopped answering (drop 1 since this page opened, during step "Factory reset (you press it)")' in log
+    assert 'router stopped answering (drop 1 since this page opened, during step "Factory reset")' in log
     assert "without an answer" in log
 
 
@@ -1062,3 +1076,117 @@ def test_log_has_no_device_data(router):
     assert "RESULT: FAIL" in log
     for secret in (LABEL["P"], LABEL["KY"], LABEL["S"], LABEL["IMEI"], LABEL["IMEI"][-4:], "SERIAL"):
         assert secret not in log
+
+
+def json_fields(bench):
+    return [t["FieldValue"] for t in json.loads(Path(bench.saved(".json")[-1].path()).read_text())["Transactions"]]
+
+
+def test_auto_box_is_ticked_when_the_demo_starts(router):
+    bench = router()
+    bench.open_station(AUTO, operator=False)
+    assert bench.station.is_checked("#rt-auto")
+
+
+def test_auto_presses_reset_and_its_confirm_and_passes(router):
+    bench = router()
+    result = bench.run(AUTO, operator=False)
+    assert " | PASS | " in result
+    assert bench.counts["resets"] == 1 and bench.counts["cancels"] == 0
+    assert bench.counts["signIns"] == 2
+    log = bench.log()
+    assert "CLICK: Factory default > Reset" in log
+    assert 'CLICK: confirm "Reset"' in log
+    assert "FACTORY RESET: pressed by the demo at " in log
+    assert "FACTORY RESET: the demo presses Reset itself (box ticked)" in log
+    assert "OPERATOR CLICK" not in log
+    assert json_fields(bench) == ["PASS", "PASS", "PENDING"]
+
+
+@pytest.mark.parametrize("word", ["OK", "Confirm", "Yes"])
+def test_auto_presses_the_known_confirm_words(router, word):
+    bench = router(confirm=word)
+    assert " | PASS | " in bench.run(AUTO, operator=False)
+    assert bench.counts["resets"] == 1
+
+
+def test_auto_answers_a_confirm_the_browser_draws(router):
+    bench = router(native="Restore factory defaults?")
+    assert " | PASS | " in bench.run(AUTO, operator=False)
+    assert bench.counts["resets"] == 1
+    assert "the router asked in a browser box: Restore factory defaults?" in bench.log()
+
+
+def test_auto_reset_with_no_confirm_waits_for_the_restart(router):
+    bench = router(noConfirm=True)
+    assert " | PASS | " in bench.run(AUTO, operator=False)
+    assert bench.counts["resets"] == 1
+
+
+def test_auto_with_an_unknown_confirm_asks_the_operator_and_never_guesses(router):
+    bench = router(confirm="Erase everything")
+    bench.open_station(AUTO, operator=False)
+    bench.scan()
+    bench.station.wait_for_selector("#rt-ask", state="visible", timeout=10000)
+    assert bench.station.inner_text("#rt-big") == "YOUR TURN"
+    assert "does not know the confirm button" in bench.station.inner_text("#rt-why")
+    assert bench.counts["resets"] == 0 and bench.counts["cancels"] == 0
+    bench.station.evaluate("""() => {
+      const frame = document.getElementById('rt-frame');
+      const view = frame.style.display === 'none' ? window.opener : frame.contentWindow;
+      view.document.getElementById('yes').click();
+    }""")
+    result = bench.finished()
+    assert " | PASS | " in result
+    assert bench.counts["resets"] == 1
+    log = bench.log()
+    assert "no confirm button the demo knows, asking the operator" in log
+    assert "FACTORY RESET: pressed by the demo at " in log
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"serial": "OTHER-SERIAL"}, {"mac": "AA:BB:CC:DD:EE:FF"}, {"name": "FastMile 5G Gateway 3.2"}],
+)
+def test_auto_never_resets_a_wrong_unit(router, change):
+    bench = router(**change)
+    assert "not reset" in bench.run(AUTO, operator=False)
+    assert bench.counts["resets"] == 0 and bench.counts["cancels"] == 0
+
+
+def test_auto_box_unticked_asks_the_operator(router):
+    bench = router()
+    bench.open_station(AUTO, operator=False)
+    bench.station.uncheck("#rt-auto")
+    bench.scan()
+    bench.station.wait_for_selector("#rt-ask", state="visible", timeout=10000)
+    assert bench.counts["resets"] == 0
+    bench.station.click("#rt-stop")
+    bench.finished()
+
+
+def test_auto_box_is_locked_during_a_run(router):
+    bench = router(confirm="Erase everything")
+    bench.open_station(AUTO, operator=False)
+    bench.scan()
+    bench.station.wait_for_selector("#rt-ask", state="visible", timeout=10000)
+    assert bench.station.is_disabled("#rt-auto")
+    bench.station.click("#rt-stop")
+    bench.finished()
+    assert bench.station.is_enabled("#rt-auto")
+
+
+def test_auto_router_that_never_restarts_is_not_tested_never_failed(router):
+    bench = router(noRestart=True)
+    result = bench.run(AUTO, operator=False)
+    assert " | NOT TESTED | The router did not restart after the demo pressed Reset." in result
+
+
+def test_auto_built_bookmarklet_runs(router):
+    code = unquote(built_bookmarklet().removeprefix("javascript:"))
+    bench = router()
+    auto = fast(code).replace("var AUTO_RESET = false", "var AUTO_RESET = true")
+    assert " | PASS | " in bench.run(auto, operator=False)
+    assert bench.counts["resets"] == 1
+    assert bench.counts["resets"] == 1
+    assert json_fields(bench)[1] != "FAIL-FAIL"
