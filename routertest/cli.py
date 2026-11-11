@@ -61,8 +61,13 @@ def main() -> None:
     parser.add_argument("--show-browser", action="store_true")
     parser.add_argument("--out", default="reports")
     args = parser.parse_args()
+    if args.real:
+        # The station runs the full flow on real units, including the reset confirm,
+        # the restart and the functional tests this command does not have
+        print("For a real unit use the station:  python -m routertest.station")
+        raise SystemExit(2)
 
-    url = args.url or (MOCK_URL if args.mock else "http://192.168.1.1")
+    url = args.url or MOCK_URL
 
     raw = input("Scan QR code: ")
     try:
