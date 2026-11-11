@@ -5,15 +5,21 @@
 // and the restart. Then it logs in again, waits for the green light and runs the
 // functional tests, reading every result twice. It asks the router for a page every
 // few seconds, shows the answer all the time and logs every drop and how long it
-// lasted. It sends nothing anywhere. It clicks only Sign in and the device on the
-// Network map: it never presses Reset. It tries each login once and changes no setting. The log says what was tried, what was seen and why a test did not run,
+// lasted. It sends nothing anywhere. It clicks only Sign in, Sign out (only to clear a
+// unit that arrived logged in by someone else) and the device on the Network map: it
+// never presses Reset. It tries each login once and changes no setting. The log says what was tried, what was seen and why a test did not run,
 // with no device data, and is kept in the browser as it grows, so a closed tab loses
 // nothing. A .json result in the shape of the three OLP stations holds the IMEI that
 // OLP files units under, so it must not be uploaded. Nothing is sent to OLP.
+// Before a scan, while no test is running, it also watches the router tab for the
+// scanner's keys: a label typed there (it begins with "{") is moved into the scan box
+// and the scanner's Enter is swallowed, so a scan never lands in the router's login
+// box and never moves the router page. It captures keys only before a run, only once
+// a "{" starts, and never reads what the operator types into the router by hand.
 (function () {
   function main(win, origin) {
     var document = win.document;
-    var VERSION = 'fastmile demo v12';
+    var VERSION = 'fastmile demo v19';
     win.RT_VERSION = VERSION;
     // OLP's two results for every station are PASS and this
     var OLP_FAIL = 'FAIL-FAIL';
@@ -38,8 +44,17 @@
     // A logged-out router draws its logged-in page for a moment before it sends the
     // browser to the login page, so being logged in only counts if it lasts this long
     var SESSION_MS = 8000;
+    // A unit can arrive still logged in from an earlier session (seen on the bench as
+    // /prelogin with the sign-out control). A logged-out router only flashes a logged-in
+    // page for under a second, so a login that is not ours and stays this long is real:
+    // the demo signs it out and logs in with the label to check the unit's own password
+    var LOGGED_IN_WAIT = 20000;
     // A router that logs out or restarts during a run is logged in again this often
     var TRIES = 3;
+    // Right after Sign in the login page lingers for a moment before the router moves
+    // to its logged-in page, so a login box only counts as a real logout once it has
+    // stayed this long with no logged-in sign on the page
+    var RELOGIN_GRACE_MS = 5000;
     var CONNECT_MS = 120000;
     var RECHECK_MS = 5000;
     var GREEN_MS = 120000;
@@ -108,7 +123,7 @@
     document.body.innerHTML =
       '<div class="page"><div class="top"><div><b>Router test station</b><small>Gateway 12 FastMile · ' + VERSION +
       '</small></div><div id="rt-link">Checking the router…</div></div>' +
-      '<div class="scan"><label for="rt-scan">Scan the QR code on the back of the unit</label>' +
+      '<div class="scan"><label for="rt-scan">Scan or paste the QR label, then press Start</label>' +
       '<div class="scanrow"><input id="rt-scan" autocomplete="off"><button id="rt-start">Start</button>' +
       '<button id="rt-stop" disabled>Stop test</button>' +
       '<button id="rt-clear" title="Clears this screen. Does not touch the router.">Reset page</button>' +
@@ -159,6 +174,9 @@
     var cancelled = false;
     var started = 0;
     var unit = null;
+    var scannedSlot = 1;
+    var pendingSlot = 1;
+    var slotSet = false;
     var checks = [];
     var logLines = [];
     var wipe = { value: 'NOT-RUN', detail: '' };
@@ -522,9 +540,21 @@
 
     // A freshly reset unit needs time to connect, so give a bad value time to change
     // A reading from a logged-out or restarting router is not a reading of the unit
+    var loginSince = 0;
     function checkRouter() {
       if (link.up === false) throw lostRouter('The router stopped answering.');
-      if (busy && unit && loginBoxes() && currentStep !== 'link') throw lostRouter('The router went back to its login page.');
+      // A login box with no logged-in sign means the router dropped our session, but
+      // right after Sign in the box lingers for a moment while the router moves to its
+      // logged-in page, so it only counts once it has stayed past the grace window
+      if (busy && unit && currentStep !== 'link' && loginBoxes() && !loggedInSignal()) {
+        loginSince = loginSince || Date.now();
+        if (Date.now() - loginSince >= RELOGIN_GRACE_MS) {
+          loginSince = 0;
+          throw lostRouter('The router went back to its login page.');
+        }
+      } else {
+        loginSince = 0;
+      }
     }
 
     async function settled(read, good) {
@@ -574,6 +604,12 @@
       var user = find('#username-login-value');
       var pass = find('#passwordLoginAria');
       return user && pass ? { user: user, pass: pass } : null;
+    }
+
+    // The sign-out control is on every logged-in page, including the /prelogin step
+    // the router shows right after Sign in, before the Network map is drawn
+    function loggedInSignal() {
+      return !!find('div.sidenav-logout');
     }
 
     function signInButton() {
@@ -681,6 +717,7 @@
     // Runs all shift, whether a test is running or not
     async function watchLink() {
       while (true) {
+        armScanCapture();
         var status = await routerAnswers();
         var isUp = status > 0;
         link.checked = Date.now();
@@ -744,6 +781,8 @@
       var end = Date.now() + READY_MS;
       var opened = Date.now();
       var inSince = 0;
+      var outSince = 0;
+      var signOuts = 0;
       addressIndex = 0;
       openRouter();
       while (Date.now() < end) {
@@ -757,6 +796,24 @@
         if (inSince && Date.now() - inSince >= SESSION_MS) {
           log('SAW', 'still logged in from the login this demo made');
           return null;
+        }
+        // A login that is not ours and stays past any flash: sign it out, then the loop
+        // finds the login box and the demo logs in with the label. Two tries, then ask.
+        var out = !keep && find('div.sidenav-logout');
+        if (out) {
+          outSince = outSince || Date.now();
+          if (Date.now() - outSince >= LOGGED_IN_WAIT) {
+            if (signOuts >= 2) {
+              throw giveUp('The unit is already logged in and did not sign out.',
+                'Press Sign out on the router page, then scan again.');
+            }
+            signOuts++;
+            log('SAW', 'the unit was already logged in, not by this demo: signing it out (' + signOuts + ')');
+            press(out, 'Sign out');
+            outSince = 0;
+          }
+        } else {
+          outSince = 0;
         }
         var waited = Math.round((Date.now() - stepStarted) / 1000);
         explain(link.up ? 'Router answers, waiting for the login box (' + waited + 's)' :
@@ -789,9 +846,12 @@
       log('TRYING', 'filled username and password');
       var button = await waitFor('the Sign in button', signInButton);
       press(button, 'Sign in');
+      // The login is done as soon as any logged-in page shows, which on this router is
+      // /prelogin (sign-out control, no Network map yet); checkIdentity then goes to
+      // /overview itself, so we no longer wait for the map here
       var outcome = await waitFor('the login to finish', function () {
         if (rejected()) return 'rejected';
-        return find('div[role="button"].mapClickArea') ? 'in' : '';
+        return (find('div[role="button"].mapClickArea') || loggedInSignal()) ? 'in' : '';
       }, LOGIN_WAIT_MS);
       if (outcome === 'rejected') return false;
       remember(SIGNED_KEY, lastFour(label.S));
@@ -1276,12 +1336,45 @@
       }
     }
 
-    function startFromScan() {
+    // explicit is true for a Start press, an Enter in the scan box, or a scan finished
+    // off the router tab; false for the input event on each keystroke mid-scan. A scan is
+    // either the unit label (its {...}), or on its own a "$SLT0n" slot barcode the operator
+    // scans first: that remembers the slot, pulls focus to the scan box and asks for the
+    // QR, and the next label scan runs under that slot.
+    function startFromScan(explicit) {
       if (busy) return;
-      var label;
-      try {
-        label = JSON.parse(scan.value);
-      } catch (e) {
+      var raw = scan.value;
+      var slotMatch = raw.match(/\$SLT0*(\d+)/i);
+      // A scanner or a slot barcode can wrap the JSON in a prefix or suffix (a symbology
+      // char, a newline, a Tab), so read the outermost {...} and ignore the rest
+      var start = raw.indexOf('{');
+      var end = raw.lastIndexOf('}');
+      var text = start !== -1 && end > start ? raw.slice(start, end + 1) : '';
+      var label = null;
+      if (text) {
+        try { label = JSON.parse(text); } catch (e) { label = null; }
+      }
+      // A slot barcode on its own: remember the slot, take focus and wait for the QR
+      if (slotMatch && !text) {
+        if (explicit) {
+          pendingSlot = parseInt(slotMatch[1], 10);
+          slotSet = true;
+          scan.value = '';
+          setCard('', 'SLOT ' + pendingSlot, 'Slot ' + pendingSlot + ' selected.', 'Now scan the unit QR.');
+          try { win.focus(); } catch (e) {}
+          scan.focus();
+          log('SAW', 'slot ' + pendingSlot + ' selected, waiting for the unit QR');
+        }
+        return;
+      }
+      if (!label) {
+        // Stay quiet mid-typing; only an explicit press says it could not be read
+        if (explicit) {
+          scan.value = '';
+          setCard('NOTTESTED', 'SCAN AGAIN', 'Could not read the label from the scan.',
+            'Click the scan box, then scan the QR on the back of the unit again.');
+          scan.focus();
+        }
         return;
       }
       var missing = ['U', 'P', 'S', '23S', 'IMEI'].filter(function (key) { return !label[key]; });
@@ -1290,13 +1383,99 @@
         setCard('NOTTESTED', 'SCAN AGAIN', 'The label is missing ' + missing.join(', ') + '.', 'Scan the QR again.');
         return;
       }
-      byId('rt-unit').textContent = [String(label.N), LABEL_NAMES[label.N] || 'unknown model',
-        'serial ' + lastFour(label.S), 'IMEI ' + lastFour(label.IMEI)].join(' · ');
+      // A slot in the same scan as the label updates the slot too
+      if (slotMatch) { pendingSlot = parseInt(slotMatch[1], 10); slotSet = true; }
+      scannedSlot = pendingSlot;
+      log('SAW', 'unit slot ' + scannedSlot);
+      // Only show the slot once a slot barcode has actually been used
+      byId('rt-unit').textContent = (slotSet ? ['Slot ' + scannedSlot] : []).concat([
+        String(label.N), LABEL_NAMES[label.N] || 'unknown model',
+        'serial ' + lastFour(label.S), 'IMEI ' + lastFour(label.IMEI)]).join(' · ');
       run(label);
     }
 
-    scan.addEventListener('input', startFromScan);
-    byId('rt-start').onclick = startFromScan;
+    scan.addEventListener('input', function () { startFromScan(false); });
+    scan.addEventListener('keydown', function (event) {
+      // A scanner ends a scan with Enter; take it as "this scan is complete"
+      if (event.key === 'Enter') { event.preventDefault(); startFromScan(true); }
+    });
+    // Let the operator paste the label straight in (Ctrl+V or right-click Paste) and run
+    // it, so a test can go ahead with no scanner at all. The pasted text lands first.
+    scan.addEventListener('paste', function () { win.setTimeout(function () { startFromScan(true); }, 0); });
+    byId('rt-start').onclick = function () { startFromScan(true); };
+
+    // A barcode scanner is a keyboard: it types the label then an Enter. When the
+    // operator is looking at the router tab, those keys land in the router's login box
+    // and its Enter moves the page. So before a run we catch the scan on whatever page
+    // has focus - the station or the router tab (same origin) - starting when the "$SLT01"
+    // prefix or the label's "{" comes, build it up, swallow the keys and the Enter, and
+    // hand the finished label
+    // to the scan box. Normal typing (not starting with "$" or "{") is left alone.
+    var scanBuf = '';
+    var scanTimer = 0;
+    var scanDoneAt = 0;
+    function balanced(text) {
+      var depth = 0;
+      for (var i = 0; i < text.length; i++) {
+        if (text[i] === '{') depth++;
+        else if (text[i] === '}') depth--;
+      }
+      return depth === 0;
+    }
+    function applyScan() {
+      win.clearTimeout(scanTimer);
+      var text = scanBuf;
+      scanBuf = '';
+      scanDoneAt = Date.now();
+      if (!text) return;
+      scan.value = text;
+      startFromScan(true);
+    }
+    function captureScanKey(event) {
+      var key = event.key;
+      // The scanner's trailing Enter or Tab arrives just after the label, by which time
+      // the run has started (busy); swallow it so it never submits or moves the router
+      if ((key === 'Enter' || key === 'Tab') && event.target !== scan &&
+          Date.now() - scanDoneAt < 1500) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      if (busy) { scanBuf = ''; return; }
+      if (event.target === scan) return;
+      // A scan starts with the "$SLT01" prefix (if the scanner is set up for it) or, with
+      // no prefix, the label's own "{". Anything else the operator types is left alone.
+      if (!scanBuf && key !== '{' && key !== '$') return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (key === 'Enter') { applyScan(); return; }
+      if (key.length === 1) {
+        scanBuf += key;
+        win.clearTimeout(scanTimer);
+        // A real scan arrives in one burst; a stalled buffer was hand typing, so drop it
+        scanTimer = win.setTimeout(function () { scanBuf = ''; }, 2000);
+        if (/}\s*$/.test(scanBuf) && balanced(scanBuf)) applyScan();
+      }
+    }
+    // Before a run the router may be in the first tab (frames blocked) or in the frame,
+    // and the frame reloads per page, so arm every same-origin document we can reach and
+    // re-arm new ones as they appear. A WeakSet keeps detached pages from piling up.
+    var scanArmed = new WeakSet();
+    function armOne(doc) {
+      if (!doc || scanArmed.has(doc)) return;
+      try {
+        doc.addEventListener('keydown', captureScanKey, true);
+        scanArmed.add(doc);
+      } catch (e) {
+        // a cross-origin or torn-down document: nothing to arm
+      }
+    }
+    function armScanCapture() {
+      armOne(document);
+      try { if (win.opener) armOne(win.opener.document); } catch (e) {}
+      try { armOne(frame.contentWindow && frame.contentWindow.document); } catch (e) {}
+      armOne(routerDocument());
+    }
     byId('rt-stop').onclick = function () { cancelled = true; };
     byId('rt-clear').onclick = clearScreen;
     byId('rt-save').onclick = saveLog;
