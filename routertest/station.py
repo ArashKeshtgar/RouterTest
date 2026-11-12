@@ -9,10 +9,9 @@ station page shows what that browser sees, live; a click on that view is passed
 on to the router page. The operator only answers one question: does the unit
 look right.
 
-Steps: label -> login -> model, serial and MAC against the label -> IMEI and
-Wi-Fi, each read twice -> visual check -> Factory default > Reset and its
-confirm -> wait for the restart -> 5G connected (the green light) -> login
-again -> SIM -> report.
+Steps: label -> login -> model, serial and MAC against the label -> IMEI, SIM,
+5G and Wi-Fi, each read twice -> visual check -> Factory default > Reset and its
+confirm -> the unit goes down -> ping 8.8.8.8 answers (back and online) -> report.
 
 Every selector comes from routertest/pages.py. The page logic (a login that is
 not ours, the login form lingering after Sign in, values read by their visible
@@ -23,11 +22,14 @@ password and only the last four characters of serials, MACs and IMEIs.
 
 import argparse
 import asyncio
+import json
 import logging
 import re
+import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
@@ -44,6 +46,8 @@ PORT = 7360
 VIEW = {"width": 1280, "height": 800}
 # Texts a reset confirm button can have. The real dialog is not captured yet, so
 # the station only clicks when exactly one new button says one of these.
+# OLP's two results for every station are PASS and this
+OLP_FAIL = "FAIL-FAIL"
 # Buttons that put off the router's "set a new password" box after a first login
 SKIP_WORDS = re.compile(r"^\s*(skip|later|not now|remind me later|cancel)\s*$", re.I)
 CONFIRM_WORDS = {"reset", "ok", "confirm", "yes", "factory reset"}
@@ -62,7 +66,8 @@ class Timing:
     restart_s: float = 300  # router coming back
     login_try_s: float = 15  # one Sign in with no answer, before signing in again
     relogin_s: float = 300  # how long to keep signing in again when there is no answer
-    green_s: float = 600  # 5G connected again after the reset (the green light)
+    ping_s: float = 600  # ping answering after the reset (unit back and on the internet)
+    ping_every_s: float = 2
     poll_s: float = 1
     frame_s: float = 0.7
     answer_s: float = 900  # operator questions
@@ -195,8 +200,10 @@ READ_JS = r"""(arg) => {
 
 class Station:
     def __init__(self, router_url: str = "http://192.168.1.1", timing: Timing | None = None,
-                 out_dir: Path = Path("reports"), headless: bool = True):
+                 out_dir: Path = Path("reports"), headless: bool = True, ping_host: str = "8.8.8.8"):
         self.router = router_url.rstrip("/")
+        self.ping_host = ping_host
+        self.ping_dev = ""
         self.t = timing or Timing()
         self.out_dir = Path(out_dir)
         self.headless = headless
@@ -282,6 +289,13 @@ class Station:
         try:
             label = extract_label(raw)
         except qr.QRError as e:
+            self.log("SCAN", "not read: %s (%d characters, %s)" % (
+                mask(str(e)), len(raw), "has a {" if "{" in raw else "no { in it"))
+            # Only the shape: letters as a/A, digits as 9, other characters as they
+            # are. Shows a scanner that types the label's symbols wrong, never the text.
+            shape = "".join("A" if c.isupper() else "a" if c.isalpha() else "9" if c.isdigit()
+                            else "\\n" if c == "\n" else "\\r" if c == "\r" else c for c in raw)
+            self.log("SCAN", "shape: " + shape[:200])
             with self.lock:
                 self.result = {"status": "SCAN AGAIN", "why": "Could not read the label: " + str(e),
                                "next": "Click the scan box and scan the QR on the back of the unit again."}
@@ -721,65 +735,55 @@ class Station:
         return await self._restarted()
 
     async def _restarted(self) -> bool:
-        # The router going down is the proof that the reset happened. No separate
-        # wait for it to come back: Login after reset waits for its login box.
+        # The router going down is the proof that the reset happened. Its coming
+        # back is waited for by after_reset (Restart, then 5G).
         self.accept_reset = False
         self.check("Factory reset", True, "router went down")
         return True
 
-    async def sim(self) -> None:
-        P, L = self.profile, self.profile["labels"]
-        self.step("SIM", "RUN", "opening Cellular Status")
-        await self.open(P["cellular_path"])
-        sim, ok = await self.read_twice(lambda: self.value(L["sim"]), lambda v: v == "Valid")
-        self.check("SIM", ok and sim == "Valid", sim or "not found")
+    def _ping_once(self) -> bool:
+        """One ping to ping_host, sent out of the network card that reaches the router,
+        so a Wi-Fi or other link on this PC can never answer for the unit."""
+        cmd = ["ping", "-c", "1", "-W", "2"]
+        if self.ping_dev:
+            cmd += ["-I", self.ping_dev]
+        try:
+            return subprocess.run(cmd + [self.ping_host], stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, timeout=10).returncode == 0
+        except Exception:
+            return False
 
-    async def sim_and_5g(self) -> None:
-        """SIM and 5G on a unit that is logged in, for a run without a reset."""
-        P = self.profile
-        await self.sim()
-        self.step("5G", "RUN", "opening Overview")
-        await self.open(P["overview_path"])
-        signal, ok = await self.read_twice(lambda: self.after(P["overview_rows"]["5g"]),
-                                           lambda v: v == "Connected")
-        self.check("5G", ok and signal == "Connected", signal or "not found")
+    def _router_dev(self) -> str:
+        """The network card the router is reached through (ip route get <router>)."""
+        host = urllib.parse.urlparse(self.router).hostname or ""
+        try:
+            out = subprocess.run(["ip", "route", "get", host], capture_output=True, text=True,
+                                 timeout=5).stdout
+            m = re.search(r"\bdev (\S+)", out)
+            return m.group(1) if m else ""
+        except Exception:
+            return ""
 
-    async def after_reset(self, label: qr.Label) -> None:
-        """After the reset: the unit back up, 5G connected (read on the router's start
-        page, no login needed), a login with the label, then SIM. 5G connected is the
-        green light, so the operator is not asked about it."""
-        P = self.profile
-        self.step("Restart", "RUN", "waiting for the unit to come back after the reset")
-        await self.wait_link(True, self.t.restart_s, "The router did not come back after the reset.",
-                             "Check the power and the light.")
-        self.check("Restart", True, "back up")
-        self.step("5G", "RUN", "waiting for 5G to connect after the reset")
-        end = time.monotonic() + self.t.green_s
-        signal, loaded = "", 0.0
+    async def after_reset(self) -> None:
+        """After the reset: ping ping_host until it answers. An answer means the unit
+        is back and on the internet through its SIM, which is the end of the test."""
+        self.ping_dev = self._router_dev()
+        self.step("Ping", "RUN", "waiting for %s to answer" % self.ping_host)
+        self.log("TRYING", "ping %s every %ds%s" % (self.ping_host, self.t.ping_every_s,
+                 " out of " + self.ping_dev if self.ping_dev else ""))
+        end, said = time.monotonic() + self.t.ping_s, time.monotonic()
         while True:
             self._check_cancel()
-            # The start page may not update by itself: load it again every 20 s
-            if time.monotonic() - loaded > 20:
-                await self.page.goto("about:blank")
-                await self.open(P["login_path"])
-                loaded = time.monotonic()
-                await asyncio.sleep(2)
-            value = await self.after(P["overview_rows"]["5g"])
-            if value != signal:
-                self.log("SAW", "5G signal: " + (value or "not shown yet"))
-                signal = value
-            if signal == "Connected" or time.monotonic() > end:
-                break
-            await asyncio.sleep(self.t.poll_s)
-        if not self.check("5G", signal == "Connected", signal or "not found"):
-            return
-        # SIM is only on Cellular Status, behind the login. This login also shows
-        # that the label's password works on the freshly reset unit.
-        if not await self.sign_in(label, "Login after reset"):
-            self.check("Login after reset", False, "label rejected after the reset")
-            return
-        self.check("Login after reset", True)
-        await self.sim()
+            if await asyncio.to_thread(self._ping_once):
+                self.check("Ping", True, self.ping_host + " answers")
+                return
+            if time.monotonic() > end:
+                self.check("Ping", False, "no answer from %s in %d min" % (self.ping_host, self.t.ping_s // 60))
+                return
+            if time.monotonic() - said >= 30:
+                self.log("SAW", "no answer from %s yet" % self.ping_host)
+                said = time.monotonic()
+            await asyncio.sleep(self.t.ping_every_s)
 
     async def functional(self, label: qr.Label) -> None:
         P, L, rows = self.profile, self.profile["labels"], self.profile["overview_rows"]
@@ -790,9 +794,13 @@ class Station:
         same = ok and imei == label.imei
         self.check("IMEI", same, "" if same else "gave two different answers" if not ok else
                    "unit %s, label %s" % (last4(imei), last4(label.imei)))
-        # SIM and 5G are read after the factory reset (sim_and_5g, after_reset)
-        self.step("Wi-Fi 2.4", "RUN", "opening Overview")
+        # SIM is on the same Cellular Status page as IMEI
+        sim, ok = await self.read_twice(lambda: self.value(L["sim"]), lambda v: v == "Valid")
+        self.check("SIM", ok and sim == "Valid", sim or "not found")
+        self.step("5G", "RUN", "opening Overview")
         await self.open(P["overview_path"])
+        signal, ok = await self.read_twice(lambda: self.after(rows["5g"]), lambda v: v == "Connected")
+        self.check("5G", ok and signal == "Connected", signal or "not found")
         for band in ("2.4", "5", "6"):
             pattern = rows["wifi_" + band]
             state, ok = await self.read_twice(lambda p=pattern: self.after(p), lambda v: v.startswith("Up"))
@@ -840,7 +848,7 @@ class Station:
                 return
             # Every test runs before the factory reset, on a unit that is already up
             # and connected. After the reset the station waits for the unit to come
-            # back and connect 5G again (the green light), logs in and reads SIM.
+            # back and reach the internet: a ping to 8.8.8.8 answers. Nothing else.
             await self.functional(label)
             await self.visual()
             failed = [c.name for c in self.checks if not c.passed]
@@ -848,10 +856,9 @@ class Station:
                 self.check("Factory reset", True, "not done: the unit failed a test", skipped=True)
             elif not do_reset:
                 self.check("Factory reset", True, "not asked for on this run", skipped=True)
-                await self.sim_and_5g()
             else:
                 await self.reset(label)
-                await self.after_reset(label)
+                await self.after_reset()
             failed = [c.name for c in self.checks if not c.passed]
             if failed:
                 status, why, next_step = "FAIL", failed[0] + " did not pass.", "Check that part of the unit."
@@ -880,6 +887,9 @@ class Station:
             self.log("TIME", "%-18s %s" % ("Total", clock(seconds)))
             if why:
                 self.log("WHY", why)
+            olp_path = self._write_olp(label, status, seconds)
+            if olp_path:
+                self.log("SAVED", "OLP result: " + olp_path)
             report_path = self._write_report(label, first)
             if report_path:
                 self.log("SAVED", "log: " + report_path.replace(".html", "-log.txt"))
@@ -891,6 +901,62 @@ class Station:
                 self.result = {"status": status, "why": why, "next": next_step,
                                "seconds": seconds, "report": report_path}
                 self.busy = False
+
+    def olp_stations(self, status: str) -> list[tuple[str, str, str]]:
+        """The three OLP stations as (station, result, detail). OLP's results are
+        PASS and FAIL-FAIL; NOT-RUN and PENDING are for a station not done."""
+        by = {c.name: c for c in self.checks}
+        reset, ping, visual = by.get("Factory reset"), by.get("Ping"), by.get("Visual")
+        if reset is None or reset.skipped:
+            wipe = ("NOT-RUN", reset.detail if reset else "the test stopped before the reset")
+        elif not reset.passed:
+            wipe = (OLP_FAIL, reset.detail)
+        elif ping is None:
+            wipe = ("NOT-RUN", "reset done, the test stopped before the unit was back")
+        else:
+            wipe = ("PASS", "reset by the station, unit back online") if ping.passed else \
+                   (OLP_FAIL, "reset done, " + ping.detail)
+        tests = [c for c in self.checks if c.name not in ("Label", "Factory reset", "Ping", "Visual")]
+        failed = [c.name for c in tests if not c.passed]
+        if failed:
+            testing = (OLP_FAIL, ", ".join(failed) + " did not pass")
+        elif status == "NOT TESTED" and not (visual or reset):
+            testing = ("NOT-RUN", "the test stopped before every check was done")
+        else:
+            testing = ("PASS", "")
+        refurb = ("PENDING", "") if visual is None else \
+                 ("PASS" if visual.passed else OLP_FAIL, "Visual check by the operator")
+        return [("ROUTER-DATA-WIPE",) + wipe, ("ROUTER-TESTING",) + testing,
+                ("ROUTER-REFURB",) + refurb]
+
+    def _write_olp(self, label: qr.Label, status: str, seconds: int) -> str:
+        """The result in the shape of OLP's history table, as the Chrome demo saves it.
+        It holds the IMEI that OLP files units under, so it is never uploaded, and
+        nothing is sent to OLP."""
+        try:
+            when = datetime.now().astimezone().isoformat(timespec="seconds")
+            stations = self.olp_stations(status)
+            data = {
+                "Tool": "router test station",
+                "Note": "Not sent to OLP. Do not upload: holds the IMEI.",
+                "SerialNumber": str(label.imei),
+                "PartNumber": label.part_number,
+                "Model": label.model,
+                "Result": status,
+                "Seconds": seconds,
+                "Checks": ["%s %s %ss" % (c.name, c.status, round(c.seconds)) for c in self.checks],
+                "Transactions": [{"TransactionType": station, "FieldKey": "RESULT", "FieldValue": value,
+                                  "Status": label.part_number, "TransactionDate": when, "Detail": detail}
+                                 for station, value, detail in stations],
+            }
+            self.out_dir.mkdir(parents=True, exist_ok=True)
+            path = self.out_dir / ("DO-NOT-UPLOAD-olp-result-%s.json" % time.strftime("%Y%m%d-%H%M%S"))
+            path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            self.log("OLP", ", ".join("%s %s" % (st[len("ROUTER-"):], v) for st, v, _ in stations))
+            return str(path)
+        except Exception as e:
+            self.log("SAW", "could not write the OLP result: " + type(e).__name__)
+            return ""
 
     def _write_report(self, label: qr.Label, first_line: int) -> str:
         try:
@@ -980,15 +1046,38 @@ async function post(path, body) {
   const r = await fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body || {})});
   return r.json();
 }
-function balanced(s) { let d = 0; for (const c of s) { if (c === '{') d++; else if (c === '}') d--; } return d === 0; }
+// A scan is sent on the scanner's Enter. A value in the label can hold a { or },
+// so the box never sends on balanced braces (that sent half a label: SCAN AGAIN,
+// then the rest as a second scan with no label). For a scanner with no Enter, a
+// pause of 0.6 s after the last character sends it.
+let scanTimer = null;
 async function send() {
+  clearTimeout(scanTimer);
   const raw = $('scan').value; $('scan').value = '';
   if (!raw.trim()) return;
   await post('/scan', {raw: raw, reset: $('doreset').checked});
   poll();
 }
-$('scan').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); send(); } });
-$('scan').addEventListener('input', () => { const v = $('scan').value; if (v.includes('}') && balanced(v.slice(v.indexOf('{')))) send(); });
+// The scanner types the label as keys: the whole page takes them, not only the
+// box, so a scan is never cut when the box does not have the cursor (bench
+// 2026-11-12: the first 1 to 7 characters were lost). It types each line break
+// in the QR as Alt + Numpad 0013; keys with Alt held are left out. Enter sends.
+document.addEventListener('keydown', (e) => {
+  if (busy || askId !== -1) return;
+  if (e.ctrlKey || e.metaKey) return;  // Ctrl+V and other shortcuts work as usual
+  if (e.altKey) { e.preventDefault(); return; }
+  if (e.key === 'Enter') { e.preventDefault(); send(); return; }
+  if (e.key.length !== 1 || document.activeElement === $('scan')) return;
+  // Outside the box (on the page or a button): the key goes into the box
+  e.preventDefault();
+  $('scan').value += e.key;
+  $('scan').dispatchEvent(new Event('input'));
+}, true);
+$('scan').addEventListener('input', () => {
+  clearTimeout(scanTimer);
+  const v = $('scan').value;
+  if (v.includes('{') && v.includes('}')) scanTimer = setTimeout(send, 600);
+});
 $('start').onclick = send;
 $('stop').onclick = () => post('/stop');
 $('copylog').onclick = async () => {
@@ -1106,12 +1195,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Router test station")
     parser.add_argument("--router", default="http://192.168.1.1", help="router admin address")
     parser.add_argument("--port", type=int, default=PORT)
+    parser.add_argument("--ping", default="8.8.8.8", help="pinged after the reset; an answer ends the test")
     parser.add_argument("--out", default="reports", help="where reports and logs go")
     parser.add_argument("--show-browser", action="store_true",
                         help="also show the router browser in its own window")
     args = parser.parse_args()
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
-    station = Station(args.router, out_dir=Path(args.out), headless=not args.show_browser)
+    station = Station(args.router, out_dir=Path(args.out), headless=not args.show_browser,
+                      ping_host=args.ping)
     station.start()
     print("Station ready: open http://127.0.0.1:%d in Chrome" % args.port, flush=True)
     try:
