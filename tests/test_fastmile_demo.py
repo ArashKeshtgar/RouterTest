@@ -59,7 +59,22 @@ const detail = (k, v) => `<div class="left"><div class="text"><pv-text><div>${k}
   <pv-text><div>${v}</div></pv-text></div></div>`;
 const cell = (k, v) => `<div class="list"><div class="left"><div class="text"><pv-text><div>${k}</div>
   </pv-text></div></div><div class="right"><pv-text><div>${v}</div></pv-text></div></div>`;
-const nav = '<div class="sidenav-logout flex-row__spacebetween"><div>Sign Out</div></div>';
+const nav = '<div class="sidenav-logout flex-row__spacebetween"><div role="button">Sign Out</div></div>';
+// unit.guest: as the real Gateway 12, a logged-out unit opens /prelogin (also for
+// #/login): the overview with no login box, and the same side-menu div holding
+// "English" and a Sign in button. Maintenance on the side menu opens the login box.
+let wantsLogin = false;
+function prelogin() {
+  if (location.hash !== '#/prelogin') history.replaceState(null, '', '#/prelogin');
+  app.innerHTML = `<div role="link" tabindex="0" class="flex-row"><a href="#" tabindex="-1">Maintenance</a></div>
+    <div class="sidenav-logout flex-row__spacebetween"><div class="flex-row">English</div>
+    <div role="button" class="pos-relative flex-row cursor"><pv-text><div>Sign in</div></pv-text></div></div>
+    <div class="prelogin-container"><div role="button" class="mapClickArea">Gateway</div>
+      <div>5G+ Signal</div><div>${unit.signal}</div></div>`;
+  app.querySelector('[role=link]').onclick = (e) => {
+    e.preventDefault(); wantsLogin = true; history.replaceState(null, '', '#/login'); login();
+  };
+}
 function show(html) {
   app.innerHTML = nav + html;
   // Sign Out on every logged-in page, as on the real router
@@ -85,7 +100,19 @@ function login() {
   u.addEventListener('input', change);
   p.addEventListener('input', change);
   button.onclick = () => {
+    // unit.ignoreSignIns: right after a restart the real unit's login service is
+    // not ready, and a Sign in then gets no answer at all
+    if (unit.ignoreSignIns > 0) { tell('ignored'); return; }
     tell('signIns');
+    if (u.value === unit.user && p.value === unit.password && unit.askNewPassword) {
+      // The first-login flow: a box asking for a new password, with a skip
+      app.innerHTML = `<pv-dialog><div>Change password</div><input type="password">
+        <pv-button><button type="button" id="skip">Skip</button></pv-button></pv-dialog>`;
+      document.getElementById('skip').onclick = () => {
+        tell('skips'); tell('loggedIn'); loggedIn = true; location.hash = '#/overview'; route();
+      };
+      return;
+    }
     if (u.value === unit.user && p.value === unit.password) {
       tell('loggedIn');
       loggedIn = true;
@@ -144,8 +171,20 @@ function askToConfirm() {
     return;
   }
   if (unit.noConfirm) { tell('resets'); tell('restart'); return; }
+  // unit.nativeConfirm (station tests): as the real Gateway 12 (doFactoryDefault
+  // in its app), the browser's own confirm box with the unit's own question
+  if (unit.nativeConfirm) {
+    if (window.confirm('Do you want to reset system configuration to factory default setting?')) {
+      tell('resets'); tell('restart');
+    } else tell('cancels');
+    return;
+  }
   const dialog = document.createElement('div');
-  dialog.innerHTML = `<button id="no">Cancel</button><button id="yes">${unit.confirm}</button>`;
+  // unit.divDialog: a dialog with no <button> (pv-button / role=button boxes)
+  dialog.innerHTML = unit.divDialog
+    ? `<p>A factory reset erases all settings.</p><pv-button><div role="button" tabindex="0" id="no">Cancel</div></pv-button>
+       <pv-button><div role="button" tabindex="0" id="yes"><span>${unit.confirm}</span></div></pv-button>`
+    : `<button id="no">Cancel</button><button id="yes">${unit.confirm}</button>`;
   app.appendChild(dialog);
   document.getElementById('no').onclick = () => tell('cancels');
   document.getElementById('yes').onclick = () => { tell('resets'); if (!unit.noRestart) tell('restart'); };
@@ -157,6 +196,7 @@ function cellular() {
 }
 function route() {
   clearTimeout(drawing);
+  if (!loggedIn && unit.guest && !wantsLogin) return prelogin();
   if (!loggedIn && unit.flash && location.hash !== '#/login') {
     show('<div role="button" class="mapClickArea">Gateway</div>');
     drawing = setTimeout(login, unit.flash);
