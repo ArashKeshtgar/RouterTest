@@ -73,9 +73,20 @@ PROFILES["gateway_12_fastmile"] = {
     "username": "#username-login-value",
     "password": "#passwordLoginAria",
     "submit": 'button[type="button"]:has-text("Sign in")',
-    # Right after Sign in the unit shows /prelogin: the sign-out control is there,
-    # the Network map is not yet (bench logs, demo v13). Only read after Sign in.
-    "logged_in": "div.sidenav-logout",
+    # A logged-out unit opens on /prelogin (also when asked for #/login): the
+    # overview without a login box, and div.sidenav-logout holds "English" and a
+    # "Sign in" button (seen on the bench 2026-11-11). So that div alone does not
+    # mean logged in: only its button that is not Sign in does. The logged-in
+    # button's own text is not captured yet.
+    "logged_in": 'div.sidenav-logout [role="button"]:not(:has-text("Sign in"))',
+    # Maintenance on the side menu leads a logged-out unit to #/login with the
+    # login box (bench 2026-11-11, the way the operators do it)
+    "sign_in_link": 'div[role="link"]:has(> a:text-is("Maintenance"))',
+    # On a narrow window the side menu is behind this button
+    "menu": '[name="burger_menu"]',
+    # After a factory reset the app can ask for a new password on the login page
+    # itself (firstLoginChangePassword in its code), in a pv-dialog with a skip
+    "first_login_dialog": "pv-dialog:visible",
     "login_error": 'div:has-text("Invalid login credentials")',
     "open_details": 'div[role="button"].mapClickArea',
     # Seen on the bench by the Chrome demo before asking the operator to press it.
