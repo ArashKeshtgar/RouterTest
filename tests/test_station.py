@@ -15,7 +15,7 @@ import pytest
 from routertest.station import Station, Timing, create_app, extract_label, mask
 from test_fastmile_demo import APP, CHROME_BLOCKED_PORTS, LABEL, unit as router_state
 
-FAST = Timing(login_try_s=2, relogin_s=20, ready_s=15, logged_in_wait_s=0.6, login_wait_s=10, action_s=10, settle_s=0,
+FAST = Timing(ping_s=4, ping_every_s=0.2, login_try_s=2, relogin_s=20, ready_s=15, logged_in_wait_s=0.6, login_wait_s=10, action_s=10, settle_s=0,
               connect_s=4, recheck_s=0.05, drop_s=10, restart_s=20, poll_s=0.1, frame_s=0.2,
               answer_s=30)
 
@@ -94,8 +94,9 @@ def operator(question, step):
     return "Done"
 
 
-def run(router, tmp_path, reset=True, answer=operator, on_prompt=None, label=LABEL):
-    st = Station(router.url, timing=FAST, out_dir=tmp_path)
+def run(router, tmp_path, reset=True, answer=operator, on_prompt=None, label=LABEL, ping="127.0.0.1"):
+    # The ping after the reset goes to this PC itself: the tests need no internet
+    st = Station(router.url, timing=FAST, out_dir=tmp_path, ping_host=ping)
     st.start()
     try:
         ok, error = st.scan(json.dumps(label), reset=reset)
@@ -140,18 +141,17 @@ def test_good_unit_runs_every_step_and_passes(router, tmp_path):
     st, s = run(r, tmp_path)
     assert s["result"]["status"] == "PASS", s["log"][-8:]
     steps = names(s)
-    for step in ("Login", "Model", "Serial", "MAC", "Factory reset", "Restart", "Login after reset",
+    for step in ("Login", "Model", "Serial", "MAC", "Factory reset", "Ping",
                  "IMEI", "SIM", "5G", "Wi-Fi 2.4", "Wi-Fi 5", "Wi-Fi 6",
                  "Wi-Fi name", "Visual"):
         assert steps[step] == "PASS", (step, steps)
-    # One login before the reset, one after it for SIM (Cellular Status is behind it)
-    assert r.counts["signIns"] == 2 and r.counts["resets"] == 1
-    # SIM and 5G are tested after the reset: the station waits for the unit to come
-    # back and connect 5G (the green light), logs in and reads SIM: no question
+    assert r.counts["signIns"] == 1 and r.counts["resets"] == 1
+    # Every test runs before the reset, SIM and 5G included; after it the only
+    # step is the ping: an answer means the unit is back and online
     order = [st["name"] for st in s["steps"]]
-    assert order[-5:] == ["Factory reset", "Restart", "5G", "Login after reset", "SIM"]
-    assert "Green light" not in steps
-    assert order.index("Wi-Fi name") < order.index("Factory reset")
+    assert order[-2:] == ["Factory reset", "Ping"]
+    assert order.index("SIM") < order.index("5G") < order.index("Factory reset")
+    assert not {"Green light", "Login after reset", "Restart"} & set(steps)
     # A stopwatch on every step, and the step times add up to the total
     assert all("secs" in step for step in s["steps"])
     assert abs(sum(step["secs"] for step in s["steps"]) - s["result"]["seconds"]) <= len(s["steps"])
@@ -174,7 +174,7 @@ def test_logged_out_unit_on_prelogin_is_not_taken_for_logged_in(router, tmp_path
     log = "\n".join(s["log"])
     assert "CLICK: Maintenance on the side menu" in log
     assert "signing it out" not in log and "CLICK: Sign out" not in log
-    assert r.counts["signIns"] == 2
+    assert r.counts["signIns"] == 1
 
 
 def test_confirm_dialog_without_button_elements_is_still_confirmed(router, tmp_path):
@@ -246,7 +246,7 @@ def test_unit_left_logged_in_is_signed_out_then_tested(router, tmp_path):
     st, s = run(r, tmp_path)
     assert s["result"]["status"] == "PASS", s["log"][-8:]
     assert any("signing it out (1)" in line for line in s["log"])
-    assert r.counts["signIns"] == 2
+    assert r.counts["signIns"] == 1
 
 
 def test_changed_password_is_not_tested_not_failed(router, tmp_path):
@@ -263,8 +263,18 @@ def test_run_without_reset_skips_it(router, tmp_path):
     assert s["result"]["status"] == "PASS"
     assert names(s)["Factory reset"] == "SKIP"
     assert r.counts["resets"] == 0 and r.counts["signIns"] == 1
-    # Without a reset, SIM and 5G are still tested, on the logged-in unit
+    # Without a reset, SIM and 5G are still tested, and there is no ping
     assert names(s)["SIM"] == "PASS" and names(s)["5G"] == "PASS"
+    assert "Ping" not in names(s)
+
+
+def test_no_ping_answer_after_the_reset_fails_the_unit(router, tmp_path):
+    # 192.0.2.1 is a documentation address that never answers
+    r = router(nativeConfirm=True)
+    st, s = run(r, tmp_path, ping="192.0.2.1")
+    assert s["result"]["status"] == "FAIL"
+    assert names(s)["Ping"] == "FAIL" and r.counts["resets"] == 1
+    assert "no answer from 192.0.2.1" in "\n".join(s["log"])
 
 
 def test_operator_saying_the_unit_looks_wrong_fails_it_and_it_is_not_reset(router, tmp_path):
@@ -282,21 +292,21 @@ def test_the_only_question_is_the_visual_check(router, tmp_path):
     assert len(asked) == 1 and "Visual" in asked[0]
 
 
-def test_sign_in_with_no_answer_after_the_restart_is_sent_again(router, tmp_path):
-    # Bench 2026-11-11, twice: 4 s after the unit came back, Sign in got no answer
-    # for 90 s. The login service is not ready yet; a fresh Sign in works later.
-    r = router(nativeConfirm=True, ignoreAfterRestart=2)
+def test_sign_in_with_no_answer_is_sent_again(router, tmp_path):
+    # Bench 2026-11-11, twice: a unit that had just come back gave no answer to
+    # Sign in for 90 s (its login service not ready yet). A fresh Sign in works later.
+    r = router(nativeConfirm=True, ignoreSignIns=2)
     st, s = run(r, tmp_path)
     assert s["result"]["status"] == "PASS", s["log"][-8:]
-    assert r.counts["ignored"] == 2 and r.counts["signIns"] == 2
+    assert r.counts["ignored"] == 2 and r.counts["signIns"] == 1
     log = "\n".join(s["log"])
     assert "signing in again" in log and "CLICK: Sign in (try 3)" in log
-    assert names(s)["Login after reset"] == "PASS" and names(s)["SIM"] == "PASS"
+    assert names(s)["Login"] == "PASS"
     assert list(Path(tmp_path).glob("*-login-no-answer.png"))
 
 
-def test_new_password_box_after_the_reset_is_skipped(router, tmp_path):
-    r = router(nativeConfirm=True, newPasswordAfterRestart=True)
+def test_new_password_box_after_sign_in_is_skipped(router, tmp_path):
+    r = router(nativeConfirm=True, askNewPassword=True)
     st, s = run(r, tmp_path)
     assert s["result"]["status"] == "PASS", s["log"][-8:]
     assert r.counts["skips"] == 1
@@ -305,7 +315,7 @@ def test_new_password_box_after_the_reset_is_skipped(router, tmp_path):
 
 
 def test_sign_in_that_never_answers_stops_with_a_picture(router, tmp_path):
-    r = router(nativeConfirm=True, ignoreAfterRestart=99)
+    r = router(nativeConfirm=True, ignoreSignIns=99)
     st, s = run(r, tmp_path)
     assert s["result"]["status"] == "NOT TESTED"
     assert "no answer after Sign in" in s["result"]["why"]
@@ -346,3 +356,143 @@ def test_web_page_and_bad_scan(tmp_path):
     assert state["busy"] is False and state["result"]["status"] == "SCAN AGAIN"
     assert client.get("/frame.jpg").status_code == 204
     assert client.post("/click", json={"x": "a"}).status_code == 400
+
+
+class ScanRecorder(Station):
+    """A station that only records what its page sends as scans."""
+
+    def __init__(self, tmp_path):
+        super().__init__("http://127.0.0.1:9", timing=FAST, out_dir=tmp_path)
+        self.scans = []
+
+    def scan(self, raw, reset=True):
+        self.scans.append(raw)
+        return True, ""
+
+
+@pytest.fixture
+def scan_page(tmp_path):
+    from playwright.sync_api import sync_playwright
+    from werkzeug.serving import make_server
+
+    st = ScanRecorder(tmp_path)
+    server = make_server("127.0.0.1", 0, create_app(st))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page()
+        page.goto("http://127.0.0.1:%d/" % server.server_port)
+        page.click("#scan")
+        yield st, page
+        browser.close()
+    server.shutdown()
+
+
+# Bench 2026-11-12: SCAN AGAIN on every scan. The page sent the box as soon as its
+# braces balanced, and a } inside a label value sent half the label; the rest and
+# the scanner's Enter then went as a second scan with no label in it.
+LABEL_WITH_BRACE = json.dumps(dict(LABEL, KY="ab}c{d}e"))
+
+
+def test_scanner_typing_a_label_with_a_brace_sends_one_whole_scan(scan_page):
+    st, page = scan_page
+    page.keyboard.type(LABEL_WITH_BRACE, delay=2)
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(1000)
+    assert st.scans == [LABEL_WITH_BRACE]
+    assert extract_label(st.scans[0]).wifi_key == "ab}c{d}e"
+
+
+def test_scanner_with_no_enter_is_sent_after_a_pause(scan_page):
+    st, page = scan_page
+    page.keyboard.type(LABEL_WITH_BRACE, delay=2)
+    page.wait_for_timeout(1500)
+    assert st.scans == [LABEL_WITH_BRACE]
+
+
+def test_rejected_scan_is_in_the_log_without_its_text(tmp_path):
+    st = Station("http://127.0.0.1:9", timing=FAST, out_dir=tmp_path)
+    ok, _ = st.scan('tail-of-a-label","KY":"secret-key"}')
+    assert not ok
+    not_read, shape = st.state()["log"][-2:]
+    assert "SCAN: not read" in not_read and "no { in it" in not_read
+    # The shape shows the symbols, never the letters or digits
+    assert "SCAN: shape:" in shape and '","AA":"' in shape
+    assert "secret" not in not_read + shape and "key" not in shape
+
+
+def type_like_the_bench_scanner(page, text):
+    """The bench scanner (2026-11-12) types each line break of the QR as
+    Alt + Numpad 0013 and ends with Enter."""
+    for i, ch in enumerate(text):
+        page.keyboard.type(ch)
+        if ch == "," or i == 0:
+            page.keyboard.down("Alt")
+            for digit in "0013":
+                page.keyboard.press("Numpad" + digit)
+            page.keyboard.up("Alt")
+    page.keyboard.press("Enter")
+
+
+def test_scan_with_alt_codes_and_the_cursor_off_the_box_is_whole(scan_page):
+    # Bench 2026-11-12: the station got 180 and 174 of 181 characters, the start
+    # cut off, while a plain test box got all of them. The page now takes the
+    # scanner's keys wherever the cursor is, and leaves out the Alt-code keys.
+    st, page = scan_page
+    page.click(".top b")  # the cursor is not in the scan box
+    type_like_the_bench_scanner(page, LABEL_WITH_BRACE)
+    page.wait_for_timeout(1000)
+    assert st.scans == [LABEL_WITH_BRACE]
+
+
+def test_scan_with_alt_codes_into_the_box_is_whole(scan_page):
+    st, page = scan_page
+    type_like_the_bench_scanner(page, LABEL_WITH_BRACE)
+    page.wait_for_timeout(1000)
+    assert st.scans == [LABEL_WITH_BRACE]
+
+
+def olp(tmp_path):
+    files = list(Path(tmp_path).glob("DO-NOT-UPLOAD-olp-result-*.json"))
+    assert len(files) == 1, files
+    data = json.loads(files[0].read_text())
+    return data, {t["TransactionType"]: t["FieldValue"] for t in data["Transactions"]}
+
+
+def test_olp_result_for_a_good_unit_has_all_three_stations_pass(router, tmp_path):
+    # The same file the Chrome demo saves: OLP's history-table fields, one record
+    # per OLP station, filed under the IMEI
+    r = router(nativeConfirm=True)
+    st, s = run(r, tmp_path)
+    assert s["result"]["status"] == "PASS", s["log"][-8:]
+    data, stations = olp(tmp_path)
+    assert stations == {"ROUTER-DATA-WIPE": "PASS", "ROUTER-TESTING": "PASS", "ROUTER-REFURB": "PASS"}
+    assert data["SerialNumber"] == LABEL["IMEI"] and data["PartNumber"] == LABEL["PN"]
+    assert data["Result"] == "PASS" and {t["FieldKey"] for t in data["Transactions"]} == {"RESULT"}
+    log = "\n".join(s["log"])
+    assert "OLP: DATA-WIPE PASS, TESTING PASS, REFURB PASS" in log
+    # The IMEI is in the OLP file only, never in the log
+    assert LABEL["IMEI"] not in log
+    assert LABEL["IMEI"] not in list(Path(tmp_path).glob("*-log.txt"))[0].read_text()
+
+
+def test_olp_result_when_the_unit_never_comes_back_fails_the_wipe(router, tmp_path):
+    r = router(nativeConfirm=True)
+    st, s = run(r, tmp_path, ping="192.0.2.1")
+    _, stations = olp(tmp_path)
+    assert stations == {"ROUTER-DATA-WIPE": "FAIL-FAIL", "ROUTER-TESTING": "PASS", "ROUTER-REFURB": "PASS"}
+
+
+def test_olp_result_for_a_wrong_unit_fails_testing_and_is_not_wiped(router, tmp_path):
+    r = router(serial="OTHER-SERIAL")
+    st, s = run(r, tmp_path)
+    _, stations = olp(tmp_path)
+    assert stations["ROUTER-TESTING"] == "FAIL-FAIL" and stations["ROUTER-DATA-WIPE"] == "NOT-RUN"
+    assert stations["ROUTER-REFURB"] == "PENDING"
+
+
+def test_olp_result_without_a_reset(router, tmp_path):
+    r = router()
+    st, s = run(r, tmp_path, reset=False)
+    _, stations = olp(tmp_path)
+    assert stations == {"ROUTER-DATA-WIPE": "NOT-RUN", "ROUTER-TESTING": "PASS", "ROUTER-REFURB": "PASS"}
