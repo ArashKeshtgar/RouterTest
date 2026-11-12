@@ -64,11 +64,13 @@ model: Gateway 12 FastMile (label N `5G31-03W-B`).
 
 3. Scan (or paste) the unit's QR label into the station's scan box.
 
-Playwright then logs in with the label, checks model, serial and MAC, presses
-Factory default > Reset and answers its confirm box itself, waits for the unit to go down, logs in again as soon as the login box is back,
-and reads IMEI, SIM, 5G and the three Wi-Fi bands twice each. The operator only
-answers two questions on the page: is the light green, and does the unit look
-right. The right half of the page is a live view of the router page Playwright
+Playwright then logs in with the label, checks model, serial and MAC, reads
+IMEI, SIM, 5G and the three Wi-Fi bands twice each, and asks the operator the
+only question: does the unit look right. Then it presses Factory default > Reset,
+answers its confirm box itself, waits for the unit to go down, and pings
+8.8.8.8 (out of the network card that reaches the router) until it answers: the
+unit is back and on the internet through its SIM, and the test ends. `--ping`
+changes the address. The right half of the page is a live view of the router page Playwright
 is on; a click there is passed on to the router. The Gateway 12 asks to confirm the
 reset with the browser's own confirm box; the station answers OK to that one
 question only, and Cancel to any other box. Every step has a stopwatch, and the
