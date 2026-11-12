@@ -59,18 +59,20 @@ model: Gateway 12 FastMile (label N `5G31-03W-B`).
 2. Start it, then open http://127.0.0.1:7360 in Chrome:
 
    ```bash
-   python -m routertest.station
+   python3 -m routertest.station
    ```
 
 3. Scan (or paste) the unit's QR label into the station's scan box.
 
 Playwright then logs in with the label, checks model, serial and MAC, presses
-Factory default > Reset and its confirm, waits for the restart, logs in again,
+Factory default > Reset and answers its confirm box itself, waits for the unit to go down, logs in again as soon as the login box is back,
 and reads IMEI, SIM, 5G and the three Wi-Fi bands twice each. The operator only
 answers two questions on the page: is the light green, and does the unit look
 right. The right half of the page is a live view of the router page Playwright
-is on; a click there is passed on to the router. If the reset's confirm button
-is not one the station knows, it asks the operator to click it on that view.
+is on; a click there is passed on to the router. The Gateway 12 asks to confirm the
+reset with the browser's own confirm box; the station answers OK to that one
+question only, and Cancel to any other box. Every step has a stopwatch, and the
+log ends with each step's time and the total.
 
 Untick "Factory reset the unit" to test without a reset. A unit left logged in
 by someone else is signed out after 20 seconds and logged in with the label.
