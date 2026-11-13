@@ -59,19 +59,27 @@ const detail = (k, v) => `<div class="left"><div class="text"><pv-text><div>${k}
   <pv-text><div>${v}</div></pv-text></div></div>`;
 const cell = (k, v) => `<div class="list"><div class="left"><div class="text"><pv-text><div>${k}</div>
   </pv-text></div></div><div class="right"><pv-text><div>${v}</div></pv-text></div></div>`;
-const nav = '<div class="sidenav-logout flex-row__spacebetween"><div role="button">Sign Out</div></div>';
+// unit.build2021: the other build of the web app (bench 2026-11-12): Maintenance is
+// a menu group, the login fields have no ids, and the sign-out control has no role
+const nav = unit.build2021
+  ? `<div class="sidenav-logout flex-row__spacebetween"><div class="pos-relative flex-row"><pv-text><div>${unit.signOutText || 'Sign out'}</div></pv-text></div></div>`
+  : '<div class="sidenav-logout flex-row__spacebetween"><div role="button">Sign Out</div></div>';
 // unit.guest: as the real Gateway 12, a logged-out unit opens /prelogin (also for
 // #/login): the overview with no login box, and the same side-menu div holding
 // "English" and a Sign in button. Maintenance on the side menu opens the login box.
 let wantsLogin = false;
 function prelogin() {
   if (location.hash !== '#/prelogin') history.replaceState(null, '', '#/prelogin');
-  app.innerHTML = `<div role="link" tabindex="0" class="flex-row"><a href="#" tabindex="-1">Maintenance</a></div>
+  // unit.booting: a unit just powered on can serve the page without Maintenance yet
+  app.innerHTML = (unit.booting ? '' : unit.build2021
+      ? `<ul><li class="flex-column"><div class="flex-row"><div class="side-icon" id="maint"><a style="margin-block: auto;">Maintenance</a></div></div></li></ul>`
+      : `<div role="link" tabindex="0" class="flex-row" id="maint"${unit.hiddenMenu ? ' style="opacity:0;width:0;height:0;overflow:hidden"' : ''}><a href="#" tabindex="-1">Maintenance</a></div>`) + `
     <div class="sidenav-logout flex-row__spacebetween"><div class="flex-row">English</div>
     <div role="button" class="pos-relative flex-row cursor"><pv-text><div>Sign in</div></pv-text></div></div>
     <div class="prelogin-container"><div role="button" class="mapClickArea">Gateway</div>
       <div>5G+ Signal</div><div>${unit.signal}</div></div>`;
-  app.querySelector('[role=link]').onclick = (e) => {
+  if (unit.booting) return;
+  document.getElementById('maint').onclick = (e) => {
     e.preventDefault(); wantsLogin = true; history.replaceState(null, '', '#/login'); login();
   };
 }
@@ -87,14 +95,14 @@ function show(html) {
 }
 function login() {
   app.innerHTML = `<div class="pos-relative">English</div><pv-text><div>Username</div></pv-text>
-    <input id="username-login-value"><pv-text><div>Password</div></pv-text>
-    <input id="passwordLoginAria" type="password">
+    ${unit.build2021 ? '<input name="value" type="text">' : '<input id="username-login-value">'}<pv-text><div>Password</div></pv-text>
+    ${unit.build2021 ? '<input name="value" type="password">' : '<input id="passwordLoginAria" type="password">'}
     <pv-vector name="input_eye_show" role="button"></pv-vector>
     <button type="button" id="in" disabled><span>Sign in</span></button>
     <div style="display:none"><div>Request timeout</div><button type="button"></button></div>
     <div id="err"></div><pv-text role="link"><div>Recommended browsers</div></pv-text>`;
-  const u = document.getElementById('username-login-value');
-  const p = document.getElementById('passwordLoginAria');
+  const u = app.querySelector('input:not([type=password])');
+  const p = app.querySelector('input[type=password]');
   const button = document.getElementById('in');
   const change = () => { button.disabled = !(u.value && p.value); };
   u.addEventListener('input', change);
@@ -190,7 +198,9 @@ function askToConfirm() {
   document.getElementById('yes').onclick = () => { tell('resets'); if (!unit.noRestart) tell('restart'); };
 }
 function cellular() {
-  show(cell('SIM', 'ROGERS') + cell('Type', 'Removable') + cell('Status', 'Valid') +
+  const or = (v, d) => (v === undefined ? d : v);
+  show(cell('SIM', or(unit.operator, 'ROGERS')) + cell('Type', 'Removable') + cell('Status', unit.sim || 'Valid') +
+    cell('IMSI', or(unit.imsi, '302720000001234')) + cell('ICCID', or(unit.iccid, '8930272000000005678')) +
     '<pv-card id="imei-card"><pv-text id="imei-title"><h2>IMEI</h2></pv-text>' +
     cell('IMEI', unit.imei) + '</pv-card>');
 }
