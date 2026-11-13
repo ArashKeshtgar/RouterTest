@@ -15,7 +15,7 @@ import pytest
 from routertest.station import Station, Timing, create_app, extract_label, mask
 from test_fastmile_demo import APP, CHROME_BLOCKED_PORTS, LABEL, unit as router_state
 
-FAST = Timing(ping_s=4, ping_every_s=0.2, login_try_s=2, relogin_s=20, ready_s=15, logged_in_wait_s=0.6, login_wait_s=10, action_s=10, settle_s=0,
+FAST = Timing(page_stuck_s=2, ping_s=4, ping_every_s=0.2, login_try_s=2, relogin_s=20, ready_s=15, logged_in_wait_s=0.6, login_wait_s=10, action_s=10, settle_s=0,
               connect_s=4, recheck_s=0.05, drop_s=10, restart_s=20, poll_s=0.1, frame_s=0.2,
               answer_s=30)
 
@@ -35,6 +35,9 @@ class Router:
 
             def do_GET(self):
                 router.answer(self)
+
+            def do_POST(self):
+                router.answer_post(self)
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         while self.server.server_address[1] in CHROME_BLOCKED_PORTS:
@@ -62,6 +65,26 @@ class Router:
         else:
             self.counts[name] += 1
 
+    def answer_post(self, request):
+        """The unit's service call: GetSIMInfo gives the modem's live SIM state.
+        modemSim=None makes the call fail, as on a unit that does not have it."""
+        length = int(request.headers.get("Content-Length") or 0)
+        call = json.loads(request.rfile.read(length) or b"{}")
+        state = self.state.get("modemSim", "Available")
+        if not request.path.endswith("/service_function_web_app.cgi") or state is None \
+                or call.get("function") != "GetSIMInfo":
+            request.send_response(404)
+            request.send_header("Content-Length", "0")
+            request.end_headers()
+            return
+        self.counts["simCalls"] = self.counts.get("simCalls", 0) + 1
+        body = json.dumps({"result": 0, "FunctionResult": {"SIMStatus": state}}).encode()
+        request.send_response(200)
+        request.send_header("Content-Type", "application/json")
+        request.send_header("Content-Length", str(len(body)))
+        request.end_headers()
+        request.wfile.write(body)
+
     def answer(self, request):
         if "/tell/" in request.path:
             self.tell(request.path.rsplit("/", 1)[-1])
@@ -78,7 +101,12 @@ class Router:
             request.end_headers()
             return
         else:
-            body = APP.replace("UNIT", json.dumps(self.state)).encode("utf-8")
+            state = self.state
+            # bootLoads: that many page loads come from a unit still starting up
+            if state.get("bootLoads"):
+                state["bootLoads"] -= 1
+                state = dict(state, booting=True)
+            body = APP.replace("UNIT", json.dumps(state)).encode("utf-8")
         request.send_response(200)
         request.send_header("Content-Type", "text/html; charset=utf-8")
         request.send_header("Content-Length", str(len(body)))
@@ -249,12 +277,47 @@ def test_unit_left_logged_in_is_signed_out_then_tested(router, tmp_path):
     assert r.counts["signIns"] == 1
 
 
+def test_a_page_without_the_login_way_is_reloaded(router, tmp_path):
+    # Bench 2026-11-12 21:23: a unit just powered on gave a page with no Maintenance,
+    # and the station waited on that one page until it gave up
+    r = router(guest=True, bootLoads=2)
+    st, s = run(r, tmp_path, reset=False)
+    assert s["result"]["status"] == "PASS", s["log"][-8:]
+    log = "\n".join(s["log"])
+    assert log.count("loading the router page again") == 2
+    assert "Maintenance elements in the page: 0" in log
+    assert "CLICK: Maintenance on the side menu" in log
+    assert list(Path(tmp_path).glob("*-no-login-way.png"))
+
+
+def test_a_hidden_maintenance_link_is_clicked_from_inside_the_page(router, tmp_path):
+    r = router(guest=True, hiddenMenu=True)
+    st, s = run(r, tmp_path, reset=False)
+    assert s["result"]["status"] == "PASS", s["log"][-8:]
+    log = "\n".join(s["log"])
+    assert "Maintenance elements in the page: 1" in log and "CLICK: Maintenance from inside the page" in log
+
+
+@pytest.mark.parametrize("sign_out", ["Sign out", "Account"])
+def test_the_2021_build_of_the_web_app(router, tmp_path, sign_out):
+    # Bench 2026-11-12 22:50: Maintenance is a menu group, the login fields have no
+    # ids, and the sign-out text is not known (Account: only the overview tells)
+    r = router(guest=True, build2021=True, signOutText=sign_out)
+    st, s = run(r, tmp_path, reset=False)
+    assert s["result"]["status"] == "PASS", s["log"][-8:]
+    log = "\n".join(s["log"])
+    assert "CLICK: Maintenance on the side menu" in log and "loading the router page again" not in log
+    assert r.counts["signIns"] == 1
+
+
 def test_changed_password_is_not_tested_not_failed(router, tmp_path):
     r = router(password="changed-by-customer")
     st, s = run(r, tmp_path)
     assert s["result"]["status"] == "NOT TESTED"
     assert "refused the label login" in s["result"]["why"]
     assert r.counts["signIns"] == 1 and r.counts["resets"] == 0
+    _, stations = olp(tmp_path)
+    assert stations == {"ROUTER-DATA-WIPE": "NOT-RUN", "ROUTER-TESTING": "NOT-RUN", "ROUTER-REFURB": "PENDING"}
 
 
 def test_run_without_reset_skips_it(router, tmp_path):
@@ -277,11 +340,13 @@ def test_no_ping_answer_after_the_reset_fails_the_unit(router, tmp_path):
     assert "no answer from 192.0.2.1" in "\n".join(s["log"])
 
 
-def test_operator_saying_the_unit_looks_wrong_fails_it_and_it_is_not_reset(router, tmp_path):
-    r = router()
+def test_operator_saying_the_unit_looks_wrong_fails_it_and_it_is_still_reset(router, tmp_path):
+    # A unit that fails a test is reset all the same (bench rule, 2026-11-12)
+    r = router(nativeConfirm=True)
     st, s = run(r, tmp_path, answer=lambda q, steps: "Fail" if "Visual" in q else operator(q, steps))
     assert s["result"]["status"] == "FAIL"
-    assert names(s)["Visual"] == "FAIL" and r.counts["resets"] == 0
+    assert names(s)["Visual"] == "FAIL" and r.counts["resets"] == 1
+    assert names(s)["Ping"] == "PASS"
 
 
 def test_the_only_question_is_the_visual_check(router, tmp_path):
@@ -496,3 +561,58 @@ def test_olp_result_without_a_reset(router, tmp_path):
     st, s = run(r, tmp_path, reset=False)
     _, stations = olp(tmp_path)
     assert stations == {"ROUTER-DATA-WIPE": "NOT-RUN", "ROUTER-TESTING": "PASS", "ROUTER-REFURB": "PASS"}
+
+
+def test_failed_sim_fails_5g_at_once_and_the_unit_is_still_reset(router, tmp_path):
+    r = router(sim="SIM not inserted", nativeConfirm=True)
+    st, s = run(r, tmp_path)
+    assert s["result"]["status"] == "FAIL"
+    steps = {step["name"]: step for step in s["steps"]}
+    assert steps["SIM"]["status"] == "FAIL"
+    assert steps["5G"]["status"] == "FAIL" and steps["5G"]["detail"] == "not tested: SIM failed"
+    # No wait for a 5G connection that cannot come
+    assert steps["5G"]["secs"] < FAST.connect_s
+    # Reset all the same, but no ping: with no SIM it cannot get online
+    assert r.counts["resets"] == 1 and steps["Factory reset"]["status"] == "PASS"
+    assert steps["Ping"]["status"] == "SKIP" and steps["Ping"]["detail"] == "not pinged: SIM and 5G failed"
+    _, stations = olp(tmp_path)
+    assert stations == {"ROUTER-DATA-WIPE": "PASS", "ROUTER-TESTING": "FAIL-FAIL", "ROUTER-REFURB": "PASS"}
+
+
+def test_sim_pulled_while_on_fails_on_the_modem_state(router, tmp_path):
+    # Bench 2026-11-12, 20:08 and 20:21: the SIM was pulled while the unit was on.
+    # Its page still showed Valid, ROGERS, IMSI and ICCID; only the modem knows.
+    r = router(modemSim="NotPresent", nativeConfirm=True)
+    st, s = run(r, tmp_path)
+    steps = {step["name"]: step for step in s["steps"]}
+    assert steps["SIM"]["status"] == "FAIL" and steps["SIM"]["detail"] == "modem says NotPresent"
+    assert steps["SIM"]["secs"] < FAST.connect_s
+    assert steps["5G"]["detail"] == "not tested: SIM failed" and steps["5G"]["secs"] < FAST.connect_s
+    assert s["result"]["status"] == "FAIL" and r.counts["resets"] == 1
+    assert r.counts["simCalls"] == 1
+
+
+def test_without_the_modem_call_the_page_rows_still_catch_a_missing_sim(router, tmp_path):
+    r = router(modemSim=None, imsi="N/A", iccid="", nativeConfirm=True)
+    st, s = run(r, tmp_path)
+    steps = {step["name"]: step for step in s["steps"]}
+    assert steps["SIM"]["status"] == "FAIL" and "no IMSI / ICCID" in steps["SIM"]["detail"]
+    assert steps["5G"]["detail"] == "not tested: SIM failed" and steps["5G"]["secs"] < FAST.connect_s
+    assert s["result"]["status"] == "FAIL" and r.counts["resets"] == 1
+
+
+def test_modem_sim_state_valid_passes(router, tmp_path):
+    # The bench unit's GetSIMInfo answers "Valid" for an inserted SIM
+    r = router(modemSim="Valid")
+    st, s = run(r, tmp_path, reset=False)
+    steps = {step["name"]: step for step in s["steps"]}
+    assert steps["SIM"]["status"] == "PASS" and s["result"]["status"] == "PASS"
+
+
+def test_good_sim_log_shows_operator_and_last_four_only(router, tmp_path):
+    r = router()
+    st, s = run(r, tmp_path, reset=False)
+    log = "\n".join(s["log"])
+    assert "modem SIM state: Available" in log
+    assert "SIM card: status Valid, operator ROGERS, IMSI ...1234, ICCID ...5678" in log
+    assert "302720000001234" not in log and "8930272000000005678" not in log
