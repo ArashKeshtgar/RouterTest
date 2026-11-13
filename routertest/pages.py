@@ -70,18 +70,26 @@ _NOKIA = {
 # about 3, so the tool only ever tries once per reset.
 PROFILES["gateway_12_fastmile"] = {
     **_NOKIA,
-    "username": "#username-login-value",
-    "password": "#passwordLoginAria",
+    # Two builds of the web app (bench 2026-11-12): one with ids on the login
+    # fields, one ("(c) 2021 Nokia" at the bottom) with only name="value" on them
+    "username": ':is(#username-login-value, input[name="value"][type="text"])',
+    "password": ':is(#passwordLoginAria, input[name="value"][type="password"])',
     "submit": 'button[type="button"]:has-text("Sign in")',
     # A logged-out unit opens on /prelogin (also when asked for #/login): the
     # overview without a login box, and div.sidenav-logout holds "English" and a
     # "Sign in" button (seen on the bench 2026-11-11). So that div alone does not
     # mean logged in: only its button that is not Sign in does. The logged-in
     # button's own text is not captured yet.
-    "logged_in": 'div.sidenav-logout [role="button"]:not(:has-text("Sign in"))',
+    # The 2021 build has no role on that button: its sign-out text is looked for
+    # instead (not captured yet, so both spellings)
+    "logged_in": ':is(div.sidenav-logout [role="button"]:not(:has-text("Sign in")), '
+                 'div.sidenav-logout pv-text:text-matches("^\\s*(sign|log) ?out\\s*$", "i"))',
     # Maintenance on the side menu leads a logged-out unit to #/login with the
     # login box (bench 2026-11-11, the way the operators do it)
-    "sign_in_link": 'div[role="link"]:has(> a:text-is("Maintenance"))',
+    # The 2021 build has it as a menu group (div.side-icon, no role), which also
+    # leads to #/login
+    "sign_in_link": ':is(div[role="link"]:has(> a:text-is("Maintenance")), '
+                    'li div.side-icon:has(> a:text-is("Maintenance")))',
     # On a narrow window the side menu is behind this button
     "menu": '[name="burger_menu"]',
     # After a factory reset the app can ask for a new password on the login page
@@ -102,6 +110,11 @@ PROFILES["gateway_12_fastmile"] = {
         "software": "Software version",
         "imei": "IMEI",
         "sim": "Status",
+        # Rows that only a SIM in the slot fills. A SIM pulled while the unit is on
+        # still shows Status "Valid" until a restart (bench 2026-11-12)
+        "sim_operator": "SIM",
+        "imsi": "IMSI",
+        "iccid": "ICCID",
     },
     # Overview rows: the value is the next text after the row's name
     "overview_rows": {
