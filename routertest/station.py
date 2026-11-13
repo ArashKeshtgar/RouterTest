@@ -48,6 +48,8 @@ VIEW = {"width": 1280, "height": 800}
 # the station only clicks when exactly one new button says one of these.
 # OLP's two results for every station are PASS and this
 OLP_FAIL = "FAIL-FAIL"
+# GetSIMInfo SIMStatus values for an inserted, usable SIM ("Valid" on the bench unit)
+MODEM_SIM_OK = {"Valid", "Available"}
 # Buttons that put off the router's "set a new password" box after a first login
 SKIP_WORDS = re.compile(r"^\s*(skip|later|not now|remind me later|cancel)\s*$", re.I)
 CONFIRM_WORDS = {"reset", "ok", "confirm", "yes", "factory reset"}
@@ -56,6 +58,7 @@ CONFIRM_WORDS = {"reset", "ok", "confirm", "yes", "factory reset"}
 @dataclass
 class Timing:
     ready_s: float = 300  # router answering and showing its login box
+    page_stuck_s: float = 30  # one page load with no login box and no Maintenance: load again
     logged_in_wait_s: float = 20  # a login that is not ours, before signing it out
     login_wait_s: float = 90  # after Sign in
     action_s: float = 30  # a page part to appear
@@ -565,6 +568,11 @@ class Station:
             self._check_cancel()
             if await self.visible(P["logged_in"]):
                 return "in"
+            # The 2021 build's sign-out control is not captured yet: the app moving
+            # on to the overview with the login box gone is a login too
+            if "/overview" in self.route() and not await self.visible(P["username"]):
+                self.log("SAW", "the router moved on to " + self.route() + " after Sign in")
+                return "in"
             if await self.visible(P["login_error"]):
                 return "refused"
             dialog = P.get("first_login_dialog")
@@ -599,10 +607,44 @@ class Station:
         self.log("SAW", "router page loaded in %.1fs" % (time.monotonic() - t0))
         end = time.monotonic() + self.t.ready_s
         in_since, outs, asked = None, 0, 0.0
+        loaded, reloads = time.monotonic(), 0
         while True:
             self._check_cancel()
             if await self.visible(P["username"]):
                 break
+            # A unit just powered on can serve a page that never gets its login way
+            # (bench 2026-11-12): after page_stuck_s on one load, load it again
+            if time.monotonic() - loaded > self.t.page_stuck_s and time.monotonic() - asked > self.t.page_stuck_s \
+                    and not await self.visible(P["logged_in"]):
+                try:
+                    text = " ".join((await self.page.evaluate("document.body.innerText") or "").split())[:160]
+                except Exception:
+                    text = ""
+                try:
+                    found = await self.page.locator(P.get("sign_in_link") or "x-none").count()
+                except Exception:
+                    found = -1
+                self.log("SAW", "no login box and no Maintenance after %ds, page %s, Maintenance "
+                                "elements in the page: %d: %s" % (
+                    self.t.page_stuck_s, self.route(), found, mask(text) or "(no text)"))
+                if reloads == 0:
+                    await self.snapshot("no-login-way")
+                # In the page but not counted as visible: click it from inside the page
+                if found > 0 and reloads == 0:
+                    try:
+                        await self.page.locator(P["sign_in_link"]).first.evaluate("e => e.click()")
+                        self.log("CLICK", "Maintenance from inside the page")
+                        asked = time.monotonic()
+                        reloads += 1
+                        continue
+                    except Exception as e:
+                        self.log("SAW", "could not click it: " + type(e).__name__)
+                reloads += 1
+                self.log("TRYING", "loading the router page again (%d)" % reloads)
+                await self.page.goto("about:blank")
+                await self.open(P["login_path"])
+                loaded = time.monotonic()
+                continue
             # A logged-out unit sits on /prelogin with no login box: Maintenance on
             # the side menu opens it (at most every 3 s, the app may be slow to react)
             if P.get("sign_in_link") and time.monotonic() - asked > 3:
@@ -785,6 +827,59 @@ class Station:
                 said = time.monotonic()
             await asyncio.sleep(self.t.ping_every_s)
 
+    async def modem_sim(self) -> str:
+        """The SIM state straight from the modem: the read-only GetSIMInfo call the
+        unit's own SIM PIN page makes. "" when the call cannot be made.
+
+        The Cellular Status page is not enough: with the SIM pulled while the unit
+        is on it still shows Valid, the operator, IMSI and ICCID (bench 2026-11-12)."""
+        try:
+            reply = await self.page.evaluate("""async () => {
+              const body = JSON.stringify({version: 1, csrf_token: localStorage.getItem('token') || '',
+                id: 1, interface: 'Nokia.GenericService', service: 'OAM', function: 'GetSIMInfo', paralist: []});
+              for (const url of ['/service_function_web_app.cgi', '/api/service_function_web_app.cgi']) {
+                try {
+                  const r = await fetch(url, {method: 'POST', credentials: 'include',
+                    headers: {'Content-Type': 'application/json'}, body: body});
+                  if (!r.ok) continue;
+                  const d = await r.json();
+                  const f = (d && d.FunctionResult) || {};
+                  return {result: d.result, status: f.SIMStatus || '', keys: Object.keys(f).join(',')};
+                } catch (e) {}
+              }
+              return null;
+            }""")
+        except Exception:
+            reply = None
+        if not reply or reply.get("result") not in (0, "0"):
+            self.log("SAW", "the modem's SIM state could not be read%s: using the Cellular Status page only"
+                     % ("" if not reply else " (result %s)" % reply.get("result")))
+            return ""
+        self.log("SAW", "modem SIM state: %s" % (reply.get("status") or "(empty)"))
+        return reply.get("status") or "(empty)"
+
+    async def sim_check(self) -> bool:
+        """SIM: the modem must say Valid (bench units) or Available, and the Cellular Status page must show
+        Valid with an operator, IMSI and ICCID. A SIM that fails is failed at once."""
+        L = self.profile["labels"]
+        modem = await self.modem_sim()
+        if modem and modem not in MODEM_SIM_OK:
+            return self.check("SIM", False, "modem says " + modem)
+        if modem:
+            sim = await self.value(L["sim"])
+            ok = True
+        else:
+            sim, ok = await self.read_twice(lambda: self.value(L["sim"]), lambda v: v == "Valid")
+        rows = {name: (await self.value(L[key])).strip() for name, key in
+                (("operator", "sim_operator"), ("IMSI", "imsi"), ("ICCID", "iccid")) if L.get(key)}
+        self.log("SAW", "SIM card: status %s, operator %s, IMSI %s, ICCID %s" % (
+            sim or "none", rows.get("operator") or "none",
+            last4(rows["IMSI"]) if rows.get("IMSI") else "none",
+            last4(rows["ICCID"]) if rows.get("ICCID") else "none"))
+        missing = [name for name, v in rows.items() if v.upper() in ("", "N/A", "NA", "-", "NONE")]
+        return self.check("SIM", ok and sim == "Valid" and not missing,
+                          (sim or "not found") + (", but no " + " / ".join(missing) if missing else ""))
+
     async def functional(self, label: qr.Label) -> None:
         P, L, rows = self.profile, self.profile["labels"], self.profile["overview_rows"]
         self.step("IMEI", "RUN", "opening Cellular Status")
@@ -794,15 +889,19 @@ class Station:
         same = ok and imei == label.imei
         self.check("IMEI", same, "" if same else "gave two different answers" if not ok else
                    "unit %s, label %s" % (last4(imei), last4(label.imei)))
-        # SIM is on the same Cellular Status page as IMEI
-        sim, ok = await self.read_twice(lambda: self.value(L["sim"]), lambda v: v == "Valid")
-        self.check("SIM", ok and sim == "Valid", sim or "not found")
+        sim_ok = await self.sim_check()
         self.step("5G", "RUN", "opening Overview")
         await self.open(P["overview_path"])
-        signal, ok = await self.read_twice(lambda: self.after(rows["5g"]), lambda v: v == "Connected")
-        self.check("5G", ok and signal == "Connected", signal or "not found")
+        if not sim_ok:
+            # No working SIM, no 5G: fail it at once instead of waiting up to
+            # connect_s for a connection that cannot come
+            self.check("5G", False, "not tested: SIM failed")
+        else:
+            signal, ok = await self.read_twice(lambda: self.after(P["overview_rows"]["5g"]),
+                                               lambda v: v == "Connected")
+            self.check("5G", ok and signal == "Connected", signal or "not found")
         for band in ("2.4", "5", "6"):
-            pattern = rows["wifi_" + band]
+            pattern = P["overview_rows"]["wifi_" + band]
             state, ok = await self.read_twice(lambda p=pattern: self.after(p), lambda v: v.startswith("Up"))
             self.check("Wi-Fi " + band, ok and state.startswith("Up"), state or "not found")
         ssid, ok = await self.read_twice(lambda: self.js("wifi"), lambda v: v == label.ssid)
@@ -847,18 +946,20 @@ class Station:
                 next_step = "Check that this QR belongs to this unit."
                 return
             # Every test runs before the factory reset, on a unit that is already up
-            # and connected. After the reset the station waits for the unit to come
-            # back and reach the internet: a ping to 8.8.8.8 answers. Nothing else.
+            # and connected. The unit is reset even when a test failed. After the
+            # reset a ping to 8.8.8.8 shows it is back online, unless SIM or 5G
+            # already failed: then it cannot get online and is not pinged.
             await self.functional(label)
             await self.visual()
-            failed = [c.name for c in self.checks if not c.passed]
-            if failed:
-                self.check("Factory reset", True, "not done: the unit failed a test", skipped=True)
-            elif not do_reset:
+            if not do_reset:
                 self.check("Factory reset", True, "not asked for on this run", skipped=True)
             else:
                 await self.reset(label)
-                await self.after_reset()
+                no_net = [c.name for c in self.checks if c.name in ("SIM", "5G") and not c.passed]
+                if no_net:
+                    self.check("Ping", True, "not pinged: %s failed" % " and ".join(no_net), skipped=True)
+                else:
+                    await self.after_reset()
             failed = [c.name for c in self.checks if not c.passed]
             if failed:
                 status, why, next_step = "FAIL", failed[0] + " did not pass.", "Check that part of the unit."
@@ -913,10 +1014,12 @@ class Station:
             wipe = (OLP_FAIL, reset.detail)
         elif ping is None:
             wipe = ("NOT-RUN", "reset done, the test stopped before the unit was back")
+        elif ping.skipped:
+            wipe = ("PASS", "reset by the station (unit went down); " + ping.detail)
         else:
             wipe = ("PASS", "reset by the station, unit back online") if ping.passed else \
                    (OLP_FAIL, "reset done, " + ping.detail)
-        tests = [c for c in self.checks if c.name not in ("Label", "Factory reset", "Ping", "Visual")]
+        tests = [c for c in self.checks if c.name not in ("Label", "Login", "Factory reset", "Ping", "Visual")]
         failed = [c.name for c in tests if not c.passed]
         if failed:
             testing = (OLP_FAIL, ", ".join(failed) + " did not pass")
